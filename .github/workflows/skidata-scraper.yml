@@ -6,6 +6,13 @@ on:
   repository_dispatch:
     # Allows external triggers (e.g. cron-job.org) via GitHub API
     types: [manual-trigger]
+  schedule:
+    # Daily backup trigger, 05:50 UTC (same time as the cron-job.org call)
+    - cron: "50 5 * * *"
+
+concurrency:
+  group: skidata-scraper
+  cancel-in-progress: false
 
 jobs:
   run-pipeline:
