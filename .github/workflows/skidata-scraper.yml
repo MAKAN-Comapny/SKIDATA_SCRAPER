@@ -3,6 +3,11 @@ name: SKIDATA Scraper
 on:
   workflow_dispatch:
     # Allow manual trigger from GitHub Actions tab
+    inputs:
+      target_date:
+        description: "Day to export, YYYY-MM-DD. Leave empty for yesterday."
+        required: false
+        default: ""
   repository_dispatch:
     # Allows external triggers (e.g. cron-job.org) via GitHub API
     types: [manual-trigger]
@@ -38,6 +43,7 @@ jobs:
       - name: Run SKIDATA pipeline
         env:
           HEADLESS: "true"
+          TARGET_DATE: ${{ inputs.target_date }}
           SKIDATA_URL: ${{ secrets.SKIDATA_URL }}
           SKIDATA_TENANT: ${{ secrets.SKIDATA_TENANT }}
           SKIDATA_LOGIN: ${{ secrets.SKIDATA_LOGIN }}

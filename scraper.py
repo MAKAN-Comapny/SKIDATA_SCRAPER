@@ -1,7 +1,7 @@
 import asyncio
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -65,6 +65,95 @@ async def find_frame_with_selector(
                 continue
         await asyncio.sleep(0.35)
     return None
+
+
+def parse_target_date() -> Optional[date]:
+    """TARGET_DATE=YYYY-MM-DD selects a specific report day. Empty means yesterday."""
+    raw = os.getenv("TARGET_DATE", "").strip()
+    return datetime.strptime(raw, "%Y-%m-%d").date() if raw else None
+
+
+def _parse_row_date(text: str) -> Optional[date]:
+    """Date filter rows read like 10/22/2026 (month/day/year)."""
+    try:
+        return datetime.strptime(text.strip().split()[0], "%m/%d/%Y").date()
+    except (ValueError, IndexError):
+        return None
+
+
+async def select_report_date(
+    list_frame: Frame, listbox_base: str, page: Page, confirm_required: bool
+) -> date:
+    """
+    Select one day in the open Date filter list and return the date that was selected.
+    Default: the second row, which is yesterday. With TARGET_DATE set: the row with that date,
+    scrolling the list until it appears. The returned date names the exported file.
+    """
+    target = parse_target_date()
+    row_item = None
+    row_date: Optional[date] = None
+
+    if target is None:
+        row_item = await list_frame.query_selector(f"{listbox_base}:has(div[data-n='1'])")
+        if row_item is None:
+            raise RuntimeError("Second date row (data-n=1) not found in Date selection list.")
+        expected = (datetime.now() - timedelta(days=1)).date()
+        row_date = _parse_row_date(await row_item.inner_text())
+        if row_date is None:
+            print(f"Warning: could not read the date of the second row. Assuming {expected}.")
+            row_date = expected
+        elif row_date != expected:
+            print(f"Warning: second row is {row_date}, not yesterday ({expected}). Using {row_date}.")
+    else:
+        seen: set = set()
+        for _ in range(40):
+            items = await list_frame.query_selector_all(listbox_base)
+            before = len(seen)
+            for item in items:
+                d = _parse_row_date(await item.inner_text())
+                if d is not None:
+                    seen.add(d)
+                if d == target:
+                    row_item, row_date = item, d
+                    break
+            if row_item is not None:
+                break
+            if not items or (len(seen) == before and seen):
+                break  # the list stopped growing
+            await items[-1].scroll_into_view_if_needed()
+            await asyncio.sleep(0.6)
+        if row_item is None:
+            if seen:
+                raise RuntimeError(
+                    f"Date {target} is not in the portal list (seen {min(seen)} to {max(seen)})."
+                )
+            raise RuntimeError(f"Date {target} is not in the portal list.")
+        print(f"Selecting {target} from the Date list.")
+
+    row_el = await row_item.query_selector('[role="row"]')
+    already = row_el is not None and await row_el.get_attribute("aria-selected") == "true"
+    if already:
+        print(f"Date {row_date} is already selected. Closing filter without changes.")
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.5)
+        return row_date
+
+    await row_item.click()
+    confirm_button_selector = (
+        "button[data-testid='actions-toolbar-confirm'][title='Confirm selection']"
+    )
+    confirm_frame = await find_frame_with_selector(
+        page, confirm_button_selector, per_frame_timeout_ms=5_000
+    )
+    if confirm_frame is not None:
+        print("Clicking Confirm selection button...")
+        await confirm_frame.click(confirm_button_selector)
+    elif confirm_required:
+        raise RuntimeError("Confirm selection button not found.")
+    else:
+        await page.keyboard.press("Escape")
+    await asyncio.sleep(0.5)
+    return row_date
 
 
 async def run_in_depth_flow(
@@ -142,35 +231,11 @@ async def run_in_depth_flow(
     await asyncio.sleep(0.8)
 
     listbox_base = "div.RowColumn-barContainer[data-testid='listbox.item']"
-    second_row_selector = f"{listbox_base}:has(div[data-n='1'])"
     print("Waiting for date list (RowColumn-barContainer)...")
     list_frame = await find_frame_with_selector(page, listbox_base)
     if list_frame is None:
         raise RuntimeError("Date list (RowColumn-barContainer) not found in any frame.")
-    second_date_item = await list_frame.query_selector(second_row_selector)
-    if second_date_item is None:
-        raise RuntimeError("Second date row (data-n=1) not found in Date selection list.")
-
-    row_el = await second_date_item.query_selector('[role="row"]')
-    is_date_already_selected = (
-        row_el is not None
-        and await row_el.get_attribute("aria-selected") == "true"
-    )
-
-    if is_date_already_selected:
-        print("Date (second row) is already selected. Closing filter without changes.")
-        await page.keyboard.press("Escape")
-        await asyncio.sleep(0.5)
-    else:
-        await second_date_item.click()
-        confirm_button_selector = (
-            "button[data-testid='actions-toolbar-confirm'][title='Confirm selection']"
-        )
-        print("Clicking Confirm selection button...")
-        confirm_frame = await find_frame_with_selector(page, confirm_button_selector)
-        if confirm_frame is None:
-            raise RuntimeError("Confirm selection button not found.")
-        await confirm_frame.click(confirm_button_selector)
+    selected_date = await select_report_date(list_frame, listbox_base, page, confirm_required=True)
 
     # 4) Open the pivot context menu by right-clicking the header.
     print(f"Right-clicking pivot table header ({header_selector}) to open context menu...")
@@ -242,8 +307,7 @@ async def run_in_depth_flow(
         await export_frame.click(export_link_selector)
     download = await download_info.value
     ext = os.path.splitext(download.suggested_filename)[1] or ".xlsx"
-    yesterday = datetime.now() - timedelta(days=1)
-    date_prefix = yesterday.strftime("%d-%b-%y")  # e.g. 15-Feb-26
+    date_prefix = selected_date.strftime("%d-%b-%y")  # e.g. 15-Feb-26
     target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}{ext}")
     await download.save_as(target_path)
     print(f"Download completed and saved to: {target_path}")
@@ -299,39 +363,11 @@ async def run_parking_transactions_flow(
     await asyncio.sleep(0.8)
 
     listbox_base = "div.RowColumn-barContainer[data-testid='listbox.item']"
-    second_row_selector = f"{listbox_base}:has(div[data-n='1'])"
     print("Waiting for date list (RowColumn-barContainer)...")
     list_frame = await find_frame_with_selector(page, listbox_base)
     if list_frame is None:
         raise RuntimeError("Date list (RowColumn-barContainer) not found in any frame.")
-    second_date_item = await list_frame.query_selector(second_row_selector)
-    if second_date_item is None:
-        raise RuntimeError("Second date row (data-n=1) not found in Date selection list.")
-
-    row_el = await second_date_item.query_selector('[role="row"]')
-    is_date_already_selected = (
-        row_el is not None
-        and await row_el.get_attribute("aria-selected") == "true"
-    )
-
-    if is_date_already_selected:
-        print("Date (second row) is already selected. Closing filter without changes.")
-        await page.keyboard.press("Escape")
-        await asyncio.sleep(0.5)
-    else:
-        await second_date_item.click()
-        confirm_button_selector = (
-            "button[data-testid='actions-toolbar-confirm'][title='Confirm selection']"
-        )
-        confirm_frame = await find_frame_with_selector(
-            page, confirm_button_selector, per_frame_timeout_ms=5_000
-        )
-        if confirm_frame is not None:
-            print("Clicking Confirm selection button...")
-            await confirm_frame.click(confirm_button_selector)
-        else:
-            await page.keyboard.press("Escape")
-        await asyncio.sleep(0.5)
+    selected_date = await select_report_date(list_frame, listbox_base, page, confirm_required=False)
 
     # Allow the main table/visualization to fully render before locating the header
     await asyncio.sleep(4)
@@ -407,8 +443,7 @@ async def run_parking_transactions_flow(
         await export_frame.click(export_link_selector)
     download = await download_info.value
     ext = os.path.splitext(download.suggested_filename)[1] or ".xlsx"
-    yesterday = datetime.now() - timedelta(days=1)
-    date_prefix = yesterday.strftime("%d-%b-%y")
+    date_prefix = selected_date.strftime("%d-%b-%y")  # e.g. 15-Feb-26
     target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}{ext}")
     await download.save_as(target_path)
     print(f"Download completed and saved to: {target_path}")

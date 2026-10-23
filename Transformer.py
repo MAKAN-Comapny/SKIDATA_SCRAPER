@@ -9,6 +9,14 @@ EXPORTS_DIR = "exports"
 CLEANED_EXPORTS_DIR = "Cleaned-Exports"
 
 
+def _require_date(data, file):
+    if "Date" not in data.columns:
+        raise SystemExit(
+            f"{os.path.basename(file)} has no 'Date' column (columns: {list(data.columns)[:8]}). "
+            "The export is empty or its layout changed."
+        )
+
+
 def run():
     """Clean downloaded files and move them to Cleaned-Exports folder."""
     all_files = glob.glob(os.path.join(EXPORTS_DIR, "*.xlsx"))
@@ -21,18 +29,21 @@ def run():
     for file in downloaded_files:
         if "Access-In-Depth" in file:
             data = pd.read_excel(file)
+            _require_date(data, file)
             data = data[data["Date"] != "Totals"]
             data = data.dropna(subset=["Date"])
             data.to_excel(file, index=False)
 
         if "Revenue-In-Depth" in file:
             data = pd.read_excel(file, header=1)
+            _require_date(data, file)
             data = data[data["Date"] != "Totals"]
             data = data.dropna(subset=["Date"])
             data.to_excel(file, index=False)
 
         if "System-Event-In-Depth" in file:
             data = pd.read_excel(file)
+            _require_date(data, file)
             data = data[data["Date"] != "Totals"]
             data = data.dropna(subset=["Date"])
             data.to_excel(file, index=False)
