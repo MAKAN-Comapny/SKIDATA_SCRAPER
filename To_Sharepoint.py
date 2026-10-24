@@ -60,9 +60,9 @@ def get_site_id(headers):
     return sites[0]["id"]
 
 
-def ensure_folder_path(site_id, headers):
+def ensure_folder_path(site_id, headers, folder=None):
     """Create nested folders if they don't exist."""
-    parts = [p for p in TARGET_FOLDER_PATH.split("/") if p.strip()]
+    parts = [p for p in (folder or TARGET_FOLDER_PATH).split("/") if p.strip()]
     current = ""
 
     for part in parts:
@@ -87,12 +87,12 @@ def ensure_folder_path(site_id, headers):
             requests.post(create_url, headers=headers, json=folder_payload)
 
 
-def upload_file(site_id, headers, file_path):
+def upload_file(site_id, headers, file_path, folder=None):
     """Upload a single file to SharePoint."""
     file_name = os.path.basename(file_path)
     upload_url = (
         f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:"
-        f"/{TARGET_FOLDER_PATH}/{file_name}:/content"
+        f"/{folder or TARGET_FOLDER_PATH}/{file_name}:/content"
     )
 
     with open(file_path, "rb") as f:
@@ -100,6 +100,18 @@ def upload_file(site_id, headers, file_path):
 
     r.raise_for_status()
     return r.json()
+
+
+def upload_files(files, folder):
+    """Upload the given files to another SharePoint folder, deleting each local copy."""
+    token = get_access_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    site_id = get_site_id(headers)
+    ensure_folder_path(site_id, headers, folder)
+    for fp in files:
+        result = upload_file(site_id, headers, fp, folder)
+        print(f"  OK: {os.path.basename(fp)} -> {result.get('webUrl', 'uploaded')}")
+        os.remove(fp)
 
 
 def main():
