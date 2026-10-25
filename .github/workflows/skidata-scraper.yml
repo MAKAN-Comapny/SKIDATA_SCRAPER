@@ -5,9 +5,17 @@ on:
     # Allow manual trigger from GitHub Actions tab
     inputs:
       target_date:
-        description: "Day to export, YYYY-MM-DD. Leave empty for yesterday."
+        description: "Day to export, YYYY-MM-DD. Leave empty for rolling window."
         required: false
         default: ""
+      days_count:
+        description: "Number of rolling days to export (default: 5)."
+        required: false
+        default: "5"
+      target_folder:
+        description: "Target SharePoint folder (default: Ski Data 5 for dev)."
+        required: false
+        default: "Ski Data 5"
   repository_dispatch:
     # Allows external triggers (e.g. cron-job.org) via GitHub API
     types: [manual-trigger]
@@ -41,6 +49,10 @@ jobs:
         env:
           HEADLESS: "true"
           TARGET_DATE: ${{ inputs.target_date }}
+          DAYS_COUNT: ${{ inputs.days_count || '5' }}
+          TARGET_FOLDER_PATH: ${{ inputs.target_folder || secrets.TARGET_FOLDER_PATH || 'Ski Data 5' }}
+          TARGET_FOLDER_PATH_ODOO: ${{ inputs.target_folder || 'Ski Data 5' }}
+          SKIP_ODOO_EXPORT: "true"
           SKIDATA_URL: ${{ secrets.SKIDATA_URL }}
           SKIDATA_TENANT: ${{ secrets.SKIDATA_TENANT }}
           SKIDATA_LOGIN: ${{ secrets.SKIDATA_LOGIN }}
@@ -49,5 +61,4 @@ jobs:
           CLIENT_ID: ${{ secrets.CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
           SHAREPOINT_SITE_NAME: ${{ secrets.SHAREPOINT_SITE_NAME }}
-          TARGET_FOLDER_PATH: ${{ secrets.TARGET_FOLDER_PATH }}
         run: python main.py

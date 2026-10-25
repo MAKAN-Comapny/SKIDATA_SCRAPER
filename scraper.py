@@ -1,3 +1,4 @@
+import glob
 import asyncio
 import os
 import time
@@ -68,9 +69,19 @@ async def find_frame_with_selector(
 
 
 def parse_target_date() -> Optional[date]:
-    """TARGET_DATE=YYYY-MM-DD selects a specific report day. Empty means yesterday."""
+    """TARGET_DATE=YYYY-MM-DD selects a specific report day. Empty means yesterday or rolling window."""
     raw = os.getenv("TARGET_DATE", "").strip()
     return datetime.strptime(raw, "%Y-%m-%d").date() if raw else None
+
+
+def parse_days_count() -> int:
+    """DAYS_COUNT specifies how many rolling past days to fetch (default: 5)."""
+    raw = os.getenv("DAYS_COUNT", "5").strip()
+    try:
+        val = int(raw)
+        return max(1, val)
+    except ValueError:
+        return 5
 
 
 def _parse_row_date(text: str) -> Optional[date]:
@@ -85,26 +96,17 @@ async def select_report_date(
     list_frame: Frame, listbox_base: str, page: Page, confirm_required: bool
 ) -> date:
     """
-    Select one day in the open Date filter list and return the date that was selected.
-    Default: the second row, which is yesterday. With TARGET_DATE set: the row with that date,
-    scrolling the list until it appears. The returned date names the exported file.
+    Select date(s) in the open Date filter list and return the reference date (yesterday).
+    If TARGET_DATE is set: selects that specific single date.
+    Otherwise: selects a rolling window of DAYS_COUNT (default: 5 days, from data-n=1 to data-n=DAYS_COUNT).
     """
     target = parse_target_date()
-    row_item = None
-    row_date: Optional[date] = None
+    expected_yesterday = (datetime.now() - timedelta(days=1)).date()
+    row_date: Optional[date] = expected_yesterday
 
-    if target is None:
-        row_item = await list_frame.query_selector(f"{listbox_base}:has(div[data-n='1'])")
-        if row_item is None:
-            raise RuntimeError("Second date row (data-n=1) not found in Date selection list.")
-        expected = (datetime.now() - timedelta(days=1)).date()
-        row_date = _parse_row_date(await row_item.inner_text())
-        if row_date is None:
-            print(f"Warning: could not read the date of the second row. Assuming {expected}.")
-            row_date = expected
-        elif row_date != expected:
-            print(f"Warning: second row is {row_date}, not yesterday ({expected}). Using {row_date}.")
-    else:
+    if target is not None:
+        # Single specific target date mode
+        row_item = None
         seen: set = set()
         for _ in range(40):
             items = await list_frame.query_selector_all(listbox_base)
@@ -130,15 +132,62 @@ async def select_report_date(
             raise RuntimeError(f"Date {target} is not in the portal list.")
         print(f"Selecting {target} from the Date list.")
 
-    row_el = await row_item.query_selector('[role="row"]')
-    already = row_el is not None and await row_el.get_attribute("aria-selected") == "true"
-    if already:
-        print(f"Date {row_date} is already selected. Closing filter without changes.")
-        await page.keyboard.press("Escape")
-        await asyncio.sleep(0.5)
-        return row_date
+        row_el = await row_item.query_selector('[role="row"]')
+        already = row_el is not None and await row_el.get_attribute("aria-selected") == "true"
+        if already:
+            print(f"Date {row_date} is already selected. Closing filter without changes.")
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
+            return row_date
 
-    await row_item.click()
+        await row_item.click()
+
+    else:
+        # Rolling multi-day window mode (default: past 5 days)
+        days_count = parse_days_count()
+        start_offset = 1  # 1 = yesterday (0 = today)
+        end_offset = start_offset + days_count - 1
+        print(f"Selecting {days_count} day(s) range (data-n={start_offset} to data-n={end_offset})...")
+
+        selected_count = 0
+        for n in range(start_offset, end_offset + 1):
+            item_sel = f"{listbox_base}:has(div[data-n='{n}'])"
+            row_item = await list_frame.query_selector(item_sel)
+
+            # Virtual scroll fallback if item is not rendered yet in DOM
+            if row_item is None:
+                for _ in range(5):
+                    await list_frame.eval_on_selector(
+                        "div.RowColumn-scrollContainer, div.lui-virtual-scroll, div.lui-list",
+                        "el => el.scrollBy(0, 150)",
+                    )
+                    await asyncio.sleep(0.2)
+                    row_item = await list_frame.query_selector(item_sel)
+                    if row_item:
+                        break
+
+            if row_item is not None:
+                # Capture the exact date of yesterday (data-n=1) for naming
+                if n == start_offset:
+                    parsed_d = _parse_row_date(await row_item.inner_text())
+                    if parsed_d is not None:
+                        row_date = parsed_d
+
+                row_el = await row_item.query_selector('[role="row"]')
+                already = row_el is not None and await row_el.get_attribute("aria-selected") == "true"
+                if not already:
+                    await row_item.scroll_into_view_if_needed()
+                    await row_item.click()
+                    selected_count += 1
+                    await asyncio.sleep(0.15)
+                else:
+                    selected_count += 1
+            else:
+                print(f"Warning: Date item data-n={n} not found in DOM.")
+
+        print(f"Successfully selected {selected_count} day(s) in Date filter.")
+
+    # Confirm selection
     confirm_button_selector = (
         "button[data-testid='actions-toolbar-confirm'][title='Confirm selection']"
     )
@@ -154,6 +203,7 @@ async def select_report_date(
         await page.keyboard.press("Escape")
     await asyncio.sleep(0.5)
     return row_date
+
 
 
 async def run_in_depth_flow(
@@ -294,7 +344,7 @@ async def run_in_depth_flow(
     await asyncio.sleep(15)
 
     export_link_selector = "a.export-url"
-    export_frame = await find_frame_with_selector(page, export_link_selector, 120_000)
+    export_frame = await find_frame_with_selector(page, export_link_selector, total_timeout_ms=600_000, per_frame_timeout_ms=2_000)
     if export_frame is None:
         raise RuntimeError("Export link did not appear in any frame.")
 
@@ -314,15 +364,117 @@ async def run_in_depth_flow(
     print(f"Exports folder (for upload): {os.path.abspath(download_dir)}")
 
 
+async def _export_parking_single_day(
+    page: Page,
+    list_frame: Frame,
+    listbox_base: str,
+    n: int,
+    prev_n: Optional[int],
+    download_dir: str,
+    header_selector: str,
+) -> str:
+    """Exports one day of Parking Transactions to avoid Qlik's 100,000 row calculation limit."""
+    # Deselect previous day if applicable
+    if prev_n is not None:
+        prev_sel = f"{listbox_base}:has(div[data-n='{prev_n}'])"
+        prev_item = await list_frame.query_selector(prev_sel)
+        if prev_item:
+            row_el = await prev_item.query_selector('[role="row"]')
+            if row_el and await row_el.get_attribute("aria-selected") == "true":
+                await prev_item.scroll_into_view_if_needed()
+                await prev_item.click()
+                await asyncio.sleep(0.2)
+
+    # Select current day n
+    item_sel = f"{listbox_base}:has(div[data-n='{n}'])"
+    item = await list_frame.query_selector(item_sel)
+    if not item:
+        for _ in range(5):
+            await list_frame.eval_on_selector(
+                "div.RowColumn-scrollContainer, div.lui-virtual-scroll, div.lui-list",
+                "el => el.scrollBy(0, 150)",
+            )
+            await asyncio.sleep(0.2)
+            item = await list_frame.query_selector(item_sel)
+            if item:
+                break
+
+    if not item:
+        raise RuntimeError(f"Parking Transactions date item data-n={n} not found.")
+
+    row_el = await item.query_selector('[role="row"]')
+    if not (row_el and await row_el.get_attribute("aria-selected") == "true"):
+        await item.scroll_into_view_if_needed()
+        await item.click()
+        await asyncio.sleep(0.2)
+
+    # Confirm selection
+    confirm_button_selector = "button[data-testid='actions-toolbar-confirm'][title='Confirm selection']"
+    confirm_frame = await find_frame_with_selector(page, confirm_button_selector, total_timeout_ms=5_000)
+    if confirm_frame:
+        await confirm_frame.click(confirm_button_selector)
+    await asyncio.sleep(2)
+
+    # Right click header
+    pivot_frame = await find_frame_with_selector(page, header_selector, total_timeout_ms=15_000)
+    if not pivot_frame:
+        pivot_frame = await find_frame_with_selector(
+            page, "article:not(.qv-object-filterpane) header.qv-object-header", total_timeout_ms=15_000
+        )
+    header_el = await pivot_frame.query_selector(header_selector)
+    if not header_el:
+        header_el = await pivot_frame.query_selector("article:not(.qv-object-filterpane) header.qv-object-header")
+    await header_el.scroll_into_view_if_needed()
+    await header_el.click(button="right")
+    await asyncio.sleep(0.5)
+
+    # Download as -> Data
+    export_group_selector = "li#export-group"
+    menu_frame = await find_frame_with_selector(page, export_group_selector, total_timeout_ms=10_000)
+    await menu_frame.click(export_group_selector)
+    await asyncio.sleep(0.5)
+
+    export_selector = "li#export"
+    export_item = await menu_frame.wait_for_selector(export_selector, timeout=10_000)
+    await export_item.click()
+    await asyncio.sleep(1)
+
+    # Click export button
+    export_button_selector = "button.lui-button:has-text('Export')"
+    export_button_frame = await find_frame_with_selector(page, export_button_selector, total_timeout_ms=5_000)
+    btn = await export_button_frame.query_selector(export_button_selector)
+    await btn.click()
+
+    # Wait for download link
+    export_link_selector = "a.export-url"
+    export_frame = await find_frame_with_selector(page, export_link_selector, total_timeout_ms=60_000)
+    if not export_frame:
+        raise RuntimeError(f"Export link not found for Parking Transactions offset {n}")
+
+    async with page.expect_download() as download_info:
+        await export_frame.click(export_link_selector)
+    download = await download_info.value
+
+    # Close modal
+    close_btn = await export_frame.query_selector("button:has-text('Close')")
+    if close_btn:
+        await close_btn.click()
+
+    temp_path = os.path.join(download_dir, f"temp_parking_day_{n}.xlsx")
+    await download.save_as(temp_path)
+    return temp_path
+
+
 async def run_parking_transactions_flow(
     page: Page,
     download_dir: str,
 ) -> None:
     """
-    In the reports tab: open Parking Transactions sheet, apply date filter (second row),
-    right-click header, Download as → Data, click Export, then save with yesterday's date.
-    Uses filter pane Date (different from pivot meta button) and Export button (no Expand all).
+    In the reports tab: open Parking Transactions sheet.
+    Because Qlik enforces a hard calculation limit (< 100,000 transactions) on this table,
+    multi-day extractions iterate day-by-day and merge the rows into a consolidated workbook.
     """
+    import pandas as pd
     sheet_display_name = "Parking Transactions"
     file_base_name = "Parking-Transactions"
     header_selector = "header#VvpsUS_title"
@@ -334,7 +486,7 @@ async def run_parking_transactions_flow(
         await page.wait_for_load_state("load")
     await asyncio.sleep(3)
 
-    # 1) Open the Parking Transactions sheet card (use span[title] to avoid matching "Personalized Parkers")
+    # 1) Open the Parking Transactions sheet card
     sheet_selector = "div.qv-content-li-inner:has(span[title='Parking Transactions'])"
     print(f"Waiting for '{sheet_display_name}' sheet card...")
     sheet_frame = await find_frame_with_selector(page, sheet_selector)
@@ -348,106 +500,70 @@ async def run_parking_transactions_flow(
     await sheet_card.scroll_into_view_if_needed()
     await sheet_card.click()
     print(f"Opened '{sheet_display_name}' sheet.")
+    await asyncio.sleep(4)
 
-    # 2) Click the Date filter (filter pane: collapsed-title-Date or h6[aria-label='Date'])
-    print("Waiting for Date filter (filter pane)...")
-    date_filter_selector = "div[data-testid='collapsed-title-Date']"
-    date_frame = await find_frame_with_selector(page, date_filter_selector)
-    if date_frame is None:
-        date_filter_selector = "h6[aria-label='Date']"
-        date_frame = await find_frame_with_selector(page, date_filter_selector)
-    if date_frame is None:
-        raise RuntimeError("Could not find Date filter in any frame.")
-    await date_frame.click(date_filter_selector)
-    print("Opened Date selection list.")
-    await asyncio.sleep(0.8)
+    target_date = parse_target_date()
+    days_count = parse_days_count() if target_date is None else 1
+    yesterday = (datetime.now() - timedelta(days=1)).date()
+    date_prefix = (target_date or yesterday).strftime("%d-%b-%y")
+    target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}.xlsx")
+    os.makedirs(download_dir, exist_ok=True)
 
     listbox_base = "div.RowColumn-barContainer[data-testid='listbox.item']"
-    print("Waiting for date list (RowColumn-barContainer)...")
-    list_frame = await find_frame_with_selector(page, listbox_base)
-    if list_frame is None:
-        raise RuntimeError("Date list (RowColumn-barContainer) not found in any frame.")
-    selected_date = await select_report_date(list_frame, listbox_base, page, confirm_required=False)
 
-    # Allow the main table/visualization to fully render before locating the header
-    await asyncio.sleep(4)
-    await page.evaluate("window.scrollTo(0, 300)")
+    if days_count == 1:
+        # Standard single day extraction
+        date_filter_selector = "div[data-testid='collapsed-title-Date']"
+        date_frame = await find_frame_with_selector(page, date_filter_selector)
+        if date_frame is None:
+            date_filter_selector = "h6[aria-label='Date']"
+            date_frame = await find_frame_with_selector(page, date_filter_selector)
+        if date_frame is None:
+            raise RuntimeError("Could not find Date filter in any frame.")
+        await date_frame.click(date_filter_selector)
+        await asyncio.sleep(0.8)
 
-    # 3) Right-click header and choose Download as... -> Data (no Expand all)
-    # Primary: header#VvpsUS_title. Fallback: second header with _title (exclude filter pane)
-    print(f"Right-clicking header ({header_selector}) to open context menu...")
-    pivot_frame = await find_frame_with_selector(
-        page, header_selector, per_frame_timeout_ms=60_000
-    )
-    if pivot_frame is None:
-        # Fallback for dynamically generated IDs: header NOT inside filter pane
-        pivot_frame = await find_frame_with_selector(
-            page,
-            "article:not(.qv-object-filterpane) header.qv-object-header",
-            per_frame_timeout_ms=30_000,
+        list_frame = await find_frame_with_selector(page, listbox_base)
+        single_temp = await _export_parking_single_day(
+            page, list_frame, listbox_base, n=1, prev_n=None, download_dir=download_dir, header_selector=header_selector
         )
-    if pivot_frame is None:
-        raise RuntimeError(
-            "Could not find Parking Transactions header (header#VvpsUS_title)."
-        )
-    # Use the selector that worked (primary or fallback)
-    pivot_header = await pivot_frame.query_selector(header_selector)
-    if pivot_header is None:
-        pivot_header = await pivot_frame.query_selector(
-            "article:not(.qv-object-filterpane) header.qv-object-header"
-        )
-    if pivot_header is None:
-        raise RuntimeError("Header element not found after frame detection.")
-    await pivot_header.scroll_into_view_if_needed()
-    await pivot_header.click(button="right")
-    await asyncio.sleep(0.5)
+        if os.path.exists(target_path):
+            os.remove(target_path)
+        os.rename(single_temp, target_path)
+        print(f"Parking Transactions saved to: {target_path}")
 
-    export_group_selector = "li#export-group"
-    export_selector = "li#export"
-    menu_frame = await find_frame_with_selector(page, export_group_selector)
-    if menu_frame is None:
-        raise RuntimeError("Context menu 'Download as...' item not found in any frame.")
-    await menu_frame.click(export_group_selector)
-    await asyncio.sleep(0.5)
-    export_item = await menu_frame.wait_for_selector(export_selector, timeout=60_000)
-    await export_item.click()
-    await asyncio.sleep(0.5)
+    else:
+        # Multi-day rolling extraction with day-by-day isolation to respect < 100k threshold
+        print(f"Exporting Parking Transactions for {days_count} days sequentially to avoid 100k row limit...")
+        day_files = []
+        prev_n = None
 
-    # 4) Click Export button (tid='table-export' or text 'Export')
-    print("Clicking Export button...")
-    export_button_selector = "button[tid='table-export']"
-    export_btn_frame = await find_frame_with_selector(page, export_button_selector)
-    if export_btn_frame is None:
-        export_button_selector = "button:has-text('Export')"
-        export_btn_frame = await find_frame_with_selector(page, export_button_selector)
-    if export_btn_frame is None:
-        export_button_selector = "button[name='confirm']:has-text('Export')"
-        export_btn_frame = await find_frame_with_selector(page, export_button_selector)
-    if export_btn_frame is None:
-        raise RuntimeError("Export button not found.")
-    await export_btn_frame.click(export_button_selector)
+        for n in range(1, days_count + 1):
+            print(f"  Fetching day {n}/{days_count} (offset {n})...")
+            date_filter_selector = "div[data-testid='collapsed-title-Date']"
+            date_frame = await find_frame_with_selector(page, date_filter_selector, total_timeout_ms=15_000)
+            if not date_frame:
+                date_filter_selector = "h6[aria-label='Date']"
+                date_frame = await find_frame_with_selector(page, date_filter_selector, total_timeout_ms=15_000)
+            await date_frame.click(date_filter_selector)
+            await asyncio.sleep(0.8)
 
-    # 5) Wait for export, then click download link
-    print("Waiting for export to complete and download link to appear...")
-    await asyncio.sleep(15)
+            list_frame = await find_frame_with_selector(page, listbox_base, total_timeout_ms=15_000)
+            fp = await _export_parking_single_day(
+                page, list_frame, listbox_base, n=n, prev_n=prev_n, download_dir=download_dir, header_selector=header_selector
+            )
+            day_files.append(fp)
+            prev_n = n
 
-    export_link_selector = "a.export-url"
-    export_frame = await find_frame_with_selector(page, export_link_selector, 120_000)
-    if export_frame is None:
-        raise RuntimeError("Export link did not appear in any frame.")
-    await export_frame.wait_for_selector(export_link_selector, timeout=300_000)
+        print("Merging day files into consolidated Parking-Transactions...")
+        dfs = [pd.read_excel(f) for f in day_files]
+        merged_df = pd.concat(dfs, ignore_index=True)
+        merged_df.to_excel(target_path, index=False)
+        print(f"SUCCESS: Saved {len(merged_df)} total rows across {days_count} days to: {target_path}")
 
-    print("Export link found, starting download...")
-    os.makedirs(download_dir, exist_ok=True)
-    async with page.expect_download() as download_info:
-        await export_frame.click(export_link_selector)
-    download = await download_info.value
-    ext = os.path.splitext(download.suggested_filename)[1] or ".xlsx"
-    date_prefix = selected_date.strftime("%d-%b-%y")  # e.g. 15-Feb-26
-    target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}{ext}")
-    await download.save_as(target_path)
-    print(f"Download completed and saved to: {target_path}")
-    print(f"Exports folder (for upload): {os.path.abspath(download_dir)}")
+        for f in day_files:
+            if os.path.exists(f):
+                os.remove(f)
 
 
 async def login_and_open_portal() -> None:
@@ -582,13 +698,17 @@ async def login_and_open_portal() -> None:
             await new_page.wait_for_load_state("load")
         await asyncio.sleep(5)
 
-        # Run Revenue in Depth Analysis.
-        await run_in_depth_flow(
-            new_page, download_dir,
-            "Revenue in Depth Analysis",
-            "Revenue-In-Depth",
-            "header#CwPV_title",
-        )
+        # Run Revenue in Depth Analysis (skip if already exported).
+        import glob
+        if not glob.glob(os.path.join(download_dir, "*Revenue-In-Depth.xlsx")):
+            await run_in_depth_flow(
+                new_page, download_dir,
+                "Revenue in Depth Analysis",
+                "Revenue-In-Depth",
+                "header#CwPV_title",
+            )
+        else:
+            print("Revenue-In-Depth already exported. Skipping.")
 
         # Close the reports tab and return to portal tab.
         print("Closing reports tab and returning to portal...")
@@ -616,13 +736,16 @@ async def login_and_open_portal() -> None:
             await new_page.wait_for_load_state("load")
         await asyncio.sleep(5)
 
-        # Run Access In Depth Analysis.
-        await run_in_depth_flow(
-            new_page, download_dir,
-            "Access in Depth Analysis",
-            "Access-In-Depth",
-            "header#b8cfe7c0-f39f-45ce-8529-5edd3499c57b_title",
-        )
+        # Run Access In Depth Analysis (skip if already exported).
+        if not glob.glob(os.path.join(download_dir, "*Access-In-Depth.xlsx")):
+            await run_in_depth_flow(
+                new_page, download_dir,
+                "Access in Depth Analysis",
+                "Access-In-Depth",
+                "header#b8cfe7c0-f39f-45ce-8529-5edd3499c57b_title",
+            )
+        else:
+            print("Access-In-Depth already exported. Skipping.")
 
         # Close reports tab and return to portal for System Event In Depth.
         print("Closing reports tab and returning to portal...")
@@ -649,13 +772,16 @@ async def login_and_open_portal() -> None:
             await new_page.wait_for_load_state("load")
         await asyncio.sleep(5)
 
-        # Run System Event In Depth Analysis.
-        await run_in_depth_flow(
-            new_page, download_dir,
-            "System Event in Depth Analysis",
-            "System-Event-In-Depth",
-            "header#jKmZn_title",
-        )
+        # Run System Event In Depth Analysis (skip if already exported).
+        if not glob.glob(os.path.join(download_dir, "*System-Event-In-Depth.xlsx")):
+            await run_in_depth_flow(
+                new_page, download_dir,
+                "System Event in Depth Analysis",
+                "System-Event-In-Depth",
+                "header#jKmZn_title",
+            )
+        else:
+            print("System-Event-In-Depth already exported. Skipping.")
 
         # Close reports tab and return to portal for Parking Transactions.
         print("Closing reports tab and returning to portal...")

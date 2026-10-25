@@ -36,17 +36,25 @@ def main():
     # loader picks up and later removes. Each step is attempted even if the other fails.
     failures = []
 
-    print("\n" + "=" * 60)
-    print("Step 3/4: Building and uploading the Odoo file (SKIDATA - Odoo)...")
-    print("=" * 60)
-    try:
-        export_for_odoo()
-    except (Exception, SystemExit) as exc:
-        print(f"Odoo export failed: {exc!r}")
-        failures.append("odoo export")
+    skip_odoo = os.getenv("SKIP_ODOO_EXPORT", "false").lower() in ("true", "1", "yes")
+    odoo_folder = os.getenv("TARGET_FOLDER_PATH_ODOO") or "SKIDATA - Odoo"
+    if not skip_odoo:
+        print("\n" + "=" * 60)
+        print(f"Step 3/4: Building and uploading the Odoo file ({odoo_folder})...")
+        print("=" * 60)
+        try:
+            export_for_odoo()
+        except (Exception, SystemExit) as exc:
+            print(f"Odoo export failed: {exc!r}")
+            failures.append("odoo export")
+    else:
+        print("\n" + "=" * 60)
+        print("Step 3/4: Skipped Odoo export (SKIP_ODOO_EXPORT=true)...")
+        print("=" * 60)
 
+    target_folder = os.getenv("TARGET_FOLDER_PATH") or "Skidata_Daily_Files"
     print("\n" + "=" * 60)
-    print("Step 4/4: Uploading to SharePoint (Skidata_Daily_Files)...")
+    print(f"Step 4/4: Uploading to SharePoint ({target_folder})...")
     print("=" * 60)
     try:
         upload_to_sharepoint()
