@@ -19,6 +19,9 @@ on:
   repository_dispatch:
     # Allows external triggers (e.g. cron-job.org) via GitHub API
     types: [manual-trigger]
+  schedule:
+    # Everyday at 05:00 UTC = 08:00 AM Saudi Time (AST)
+    - cron: "0 5 * * *"
 
 concurrency:
   group: skidata-scraper
