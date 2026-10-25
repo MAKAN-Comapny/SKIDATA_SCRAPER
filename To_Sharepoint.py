@@ -87,8 +87,54 @@ def ensure_folder_path(site_id, headers, folder=None):
             requests.post(create_url, headers=headers, json=folder_payload)
 
 
+def upload_large_file(site_id, headers, file_path, folder=None):
+    """Upload large file (> 4MB) to SharePoint using chunked upload session."""
+    file_name = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path)
+    target_dir = folder or TARGET_FOLDER_PATH
+
+    session_url = (
+        f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:"
+        f"/{target_dir}/{file_name}:/createUploadSession"
+    )
+
+    payload = {
+        "item": {
+            "@microsoft.graph.conflictBehavior": "replace",
+            "name": file_name,
+        }
+    }
+
+    r = requests.post(session_url, headers=headers, json=payload)
+    r.raise_for_status()
+    upload_url = r.json()["uploadUrl"]
+
+    # 5MB chunks (must be multiple of 320 KiB)
+    chunk_size = 5 * 1024 * 1024
+    last_response = None
+    with open(file_path, "rb") as f:
+        start = 0
+        while start < file_size:
+            chunk = f.read(chunk_size)
+            end = start + len(chunk) - 1
+            chunk_headers = {
+                "Content-Length": str(len(chunk)),
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+            }
+            res = requests.put(upload_url, headers=chunk_headers, data=chunk)
+            res.raise_for_status()
+            last_response = res
+            start = end + 1
+
+    return last_response.json() if last_response else {}
+
+
 def upload_file(site_id, headers, file_path, folder=None):
-    """Upload a single file to SharePoint."""
+    """Upload a single file to SharePoint (uses chunked session if > 4MB)."""
+    file_size = os.path.getsize(file_path)
+    if file_size > 4 * 1024 * 1024:
+        return upload_large_file(site_id, headers, file_path, folder)
+
     file_name = os.path.basename(file_path)
     upload_url = (
         f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:"
