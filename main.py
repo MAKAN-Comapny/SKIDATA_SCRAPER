@@ -8,6 +8,7 @@ Orchestrates the full workflow:
   4. To_Sharepoint - Upload cleaned files to Microsoft SharePoint
 """
 import asyncio
+import os
 import sys
 
 from dotenv import load_dotenv

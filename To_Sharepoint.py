@@ -60,9 +60,14 @@ def get_site_id(headers):
     return sites[0]["id"]
 
 
+def get_target_folder(folder=None):
+    return folder or os.getenv("TARGET_FOLDER_PATH") or TARGET_FOLDER_PATH
+
+
 def ensure_folder_path(site_id, headers, folder=None):
     """Create nested folders if they don't exist."""
-    parts = [p for p in (folder or TARGET_FOLDER_PATH).split("/") if p.strip()]
+    target_folder = get_target_folder(folder)
+    parts = [p for p in target_folder.split("/") if p.strip()]
     current = ""
 
     for part in parts:
@@ -91,7 +96,7 @@ def upload_large_file(site_id, headers, file_path, folder=None):
     """Upload large file (> 4MB) to SharePoint using chunked upload session."""
     file_name = os.path.basename(file_path)
     file_size = os.path.getsize(file_path)
-    target_dir = folder or TARGET_FOLDER_PATH
+    target_dir = get_target_folder(folder)
 
     session_url = (
         f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:"
@@ -136,9 +141,10 @@ def upload_file(site_id, headers, file_path, folder=None):
         return upload_large_file(site_id, headers, file_path, folder)
 
     file_name = os.path.basename(file_path)
+    target_dir = get_target_folder(folder)
     upload_url = (
         f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:"
-        f"/{folder or TARGET_FOLDER_PATH}/{file_name}:/content"
+        f"/{target_dir}/{file_name}:/content"
     )
 
     with open(file_path, "rb") as f:
