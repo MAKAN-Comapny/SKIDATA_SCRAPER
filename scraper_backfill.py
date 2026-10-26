@@ -378,10 +378,7 @@ async def scrape_month(
     print("=" * 65)
 
     async with async_playwright() as p:
-        try:
-            browser = await p.chromium.launch(channel="msedge", headless=headless)
-        except Exception:
-            browser = await p.chromium.launch(headless=headless)
+        browser = await p.chromium.launch(headless=headless)
 
         context = await browser.new_context(
             accept_downloads=True,
@@ -389,33 +386,49 @@ async def scrape_month(
         )
         page = await context.new_page()
 
-        print("Opening SKIDATA login page...")
+        print(f"Opening SKIDATA login page: {skidata_url}")
         await page.goto(skidata_url, wait_until="domcontentloaded")
         await asyncio.sleep(2)
         await page.fill("#tenantName", tenant)
         await page.fill("#loginName", login)
         await page.fill("#password", password)
+        print("Submitting login form...")
         await page.click("form.login_form button[type='submit']")
 
-        await asyncio.sleep(6)
-        hub_frame = None
-        for f in page.frames:
-            if "hub" in f.url:
-                hub_frame = f
-                break
-        if not hub_frame:
-            hub_frame = page.frames[0]
+        print("Waiting for portal hub to load (networkidle)...")
+        try:
+            await page.wait_for_load_state("networkidle", timeout=45_000)
+        except PlaywrightTimeoutError:
+            await page.wait_for_load_state("domcontentloaded")
+        await asyncio.sleep(5)
 
         card_container_selector = "div.qv-content-li-inner:has-text('Parking_Dashboards_SA_Makan_Analyze')"
-        await hub_frame.wait_for_selector(card_container_selector, timeout=45_000)
-        card_element = await hub_frame.query_selector(card_container_selector)
+        print("Searching for portal app card across all frames...")
+        target_frame = await find_frame_with_selector(
+            page, card_container_selector, per_frame_timeout_ms=15_000, total_timeout_ms=60_000
+        )
+        if target_frame is None:
+            raise RuntimeError("Could not find portal app card in any frame after login.")
+        print("Found portal app card.")
 
         async def open_reports_tab():
-            await card_element.scroll_into_view_if_needed()
-            new_page_promise = context.wait_for_event("page", timeout=60_000)
-            await card_element.click()
-            tab = await new_page_promise
+            card_frame = await find_frame_with_selector(
+                page, card_container_selector, per_frame_timeout_ms=15_000, total_timeout_ms=60_000
+            )
+            if not card_frame:
+                raise RuntimeError("Could not find portal card frame.")
+            card_el = await card_frame.query_selector(card_container_selector)
+            if not card_el:
+                raise RuntimeError("Portal card element not found.")
+            await card_el.scroll_into_view_if_needed()
+            await asyncio.sleep(1)
+
+            print("Clicking portal card to open reports tab...")
+            async with context.expect_page(timeout=60_000) as new_page_info:
+                await card_el.click(force=True)
+            tab = await new_page_info.value
             await tab.wait_for_load_state("domcontentloaded")
+            print(f"Reports tab opened: {tab.url}. Waiting for network idle...")
             try:
                 await tab.wait_for_load_state("networkidle", timeout=60_000)
             except PlaywrightTimeoutError:
@@ -430,7 +443,10 @@ async def scrape_month(
                 tab, download_dir, "Revenue in Depth Analysis", "Revenue-In-Depth",
                 "header#CwPV_title", start_date, end_date, file_prefix
             )
+            print("Closing reports tab and returning to portal...")
             await tab.close()
+            await page.bring_to_front()
+            await asyncio.sleep(2)
 
         # 2. Access In Depth
         if sheet_filter in ("all", "access"):
@@ -439,7 +455,10 @@ async def scrape_month(
                 tab, download_dir, "Access in Depth Analysis", "Access-In-Depth",
                 "header#b8cfe7c0-f39f-45ce-8529-5edd3499c57b_title", start_date, end_date, file_prefix
             )
+            print("Closing reports tab and returning to portal...")
             await tab.close()
+            await page.bring_to_front()
+            await asyncio.sleep(2)
 
         # 3. System Event In Depth
         if sheet_filter in ("all", "system_events", "events"):
@@ -448,7 +467,10 @@ async def scrape_month(
                 tab, download_dir, "System Event in Depth Analysis", "System-Event-In-Depth",
                 "header#jKmZn_title", start_date, end_date, file_prefix
             )
+            print("Closing reports tab and returning to portal...")
             await tab.close()
+            await page.bring_to_front()
+            await asyncio.sleep(2)
 
         # 4. Parking Transactions
         if sheet_filter in ("all", "parking", "transactions"):
@@ -456,7 +478,10 @@ async def scrape_month(
             await run_parking_transactions_flow(
                 tab, download_dir, start_date, end_date, file_prefix
             )
+            print("Closing reports tab and returning to portal...")
             await tab.close()
+            await page.bring_to_front()
+            await asyncio.sleep(2)
 
         await browser.close()
         print(f"\nFinished scraping {month_name}.")
