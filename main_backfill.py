@@ -101,26 +101,30 @@ async def execute_month_pipeline(spec: dict, sheet_filter: str, headless: bool, 
     os.makedirs(spec["local_exports"], exist_ok=True)
     os.makedirs(spec["local_cleaned"], exist_ok=True)
 
-    # 1. Scrape from portal
-    await scrape_month(
-        month_name=spec["name"],
-        start_date=spec["start_date"],
-        end_date=spec["end_date"],
-        file_prefix=spec["file_prefix"],
-        download_dir=spec["local_exports"],
-        sheet_filter=sheet_filter,
-        headless=headless,
-    )
+    try:
+        # 1. Scrape from portal
+        await scrape_month(
+            month_name=spec["name"],
+            start_date=spec["start_date"],
+            end_date=spec["end_date"],
+            file_prefix=spec["file_prefix"],
+            download_dir=spec["local_exports"],
+            sheet_filter=sheet_filter,
+            headless=headless,
+        )
+    finally:
+        # 2. Clean and Stage downloaded files
+        clean_and_stage(spec["local_exports"], spec["local_cleaned"])
 
-    # 2. Clean and Stage
-    clean_and_stage(spec["local_exports"], spec["local_cleaned"])
-
-    # 3. Upload to SharePoint
-    if not no_upload:
-        print(f"\nUploading to SharePoint: {spec['sharepoint_folder']}...")
-        upload_backfill(target_folder=spec["sharepoint_folder"], source_dir=spec["local_cleaned"])
-    else:
-        print(f"\nUpload skipped (--no-upload). Files saved locally in {spec['local_cleaned']}/")
+        # 3. Upload to SharePoint
+        if not no_upload:
+            print(f"\nUploading available files to SharePoint: {spec['sharepoint_folder']}...")
+            try:
+                upload_backfill(target_folder=spec["sharepoint_folder"], source_dir=spec["local_cleaned"])
+            except Exception as up_err:
+                print(f"SharePoint upload error: {up_err}")
+        else:
+            print(f"\nUpload skipped (--no-upload). Files saved locally in {spec['local_cleaned']}/")
 
     print("\n" + "=" * 65)
     print(f"COMPLETED PIPELINE FOR {spec['name'].upper()}")

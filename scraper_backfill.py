@@ -335,21 +335,62 @@ async def run_parking_transactions_flow(
 
     export_item = await export_frame_menu.wait_for_selector(export_selector, timeout=60_000)
     await export_item.click()
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(1.5)
 
-    export_button_selector = "button.lui-button:has-text('Export')"
-    export_button_frame = await find_frame_with_selector(page, export_button_selector, per_frame_timeout_ms=10_000)
-    if export_button_frame is not None:
-        btn = await export_button_frame.query_selector(export_button_selector)
-        if btn is not None:
-            await btn.click()
+    # 3.5) Click modal Export button (check main page and all frames)
+    print("Looking for Export dialog button...")
+    clicked_export = False
+    for attempt in range(12):
+        # Check main page
+        btns = await page.query_selector_all("button:has-text('Export')")
+        for b in btns:
+            if await b.is_visible():
+                await b.click(force=True)
+                clicked_export = True
+                print("  Clicked Export button on main page dialog.")
+                break
+        if clicked_export:
+            break
+
+        # Check subframes
+        for frame in page.frames:
+            try:
+                b = await frame.query_selector("button:has-text('Export')")
+                if b and await b.is_visible():
+                    await b.click(force=True)
+                    clicked_export = True
+                    print(f"  Clicked Export button in frame.")
+                    break
+            except Exception:
+                pass
+        if clicked_export:
+            break
+        await asyncio.sleep(1)
+
+    if not clicked_export:
+        print("  Notice: Explicit modal button not found, pressing Enter to trigger export...")
+        await page.keyboard.press("Enter")
 
     # 4) Download link
-    print("Waiting for Parking Transactions export...")
+    print("Waiting for Parking Transactions export to generate...")
     export_link_selector = "a.export-url"
-    export_frame = await find_frame_with_selector(page, export_link_selector, total_timeout_ms=300_000)
+    export_frame = await find_frame_with_selector(page, export_link_selector, total_timeout_ms=300_000, per_frame_timeout_ms=3_000)
     if export_frame is None:
-        raise RuntimeError("Export link did not appear in time.")
+        # Check if error message appeared in dialog
+        err_msg = ""
+        for frame in page.frames:
+            try:
+                err_el = await frame.query_selector(".lui-dialog__body, .lui-dialog, .qv-object-error")
+                if err_el:
+                    err_msg = await err_el.inner_text()
+                    break
+            except Exception:
+                pass
+        if not err_msg:
+            err_el = await page.query_selector(".lui-dialog__body, .lui-dialog")
+            if err_el:
+                err_msg = await err_el.inner_text()
+        raise RuntimeError(f"Export link did not appear in time. Dialog text: {err_msg or '(none)'}")
 
     os.makedirs(download_dir, exist_ok=True)
     async with page.expect_download(timeout=180_000) as download_info:
@@ -357,6 +398,14 @@ async def run_parking_transactions_flow(
     download = await download_info.value
     await download.save_as(target_path)
     print(f"Parking Transactions complete: {target_path} ({os.path.getsize(target_path):,} bytes)")
+
+    # Close modal
+    try:
+        close_btn = await page.query_selector("button:has-text('Close')") or await export_frame.query_selector("button:has-text('Close')")
+        if close_btn:
+            await close_btn.click()
+    except Exception:
+        pass
 
 
 async def scrape_month(
