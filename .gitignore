@@ -14,6 +14,8 @@ env/
 # Scraper output
 exports/
 Cleaned-Exports/
+exports_sep_1_10/
+exports_backfill/
 
 # IDE
 .idea/
