@@ -13,7 +13,7 @@ on:
         required: false
         default: "5"
       target_folder:
-        description: "Target SharePoint folder (default: Ski Data 5 for dev)."
+        description: "Target folder: 'Ski Data 5' (daily) or 'Validated_Docs' (Aug & Sep backfill)"
         required: false
         default: "Ski Data 5"
   repository_dispatch:
@@ -64,4 +64,10 @@ jobs:
           CLIENT_ID: ${{ secrets.CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
           SHAREPOINT_SITE_NAME: ${{ secrets.SHAREPOINT_SITE_NAME }}
-        run: python main.py
+        run: |
+          if [ "${{ inputs.target_folder }}" = "Validated_Docs" ]; then
+            echo "Running Historical Backfill for August & September -> Validated_Docs..."
+            python main_backfill.py --month both --headless
+          else
+            python main.py
+          fi
