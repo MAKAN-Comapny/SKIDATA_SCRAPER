@@ -23,21 +23,6 @@ def main():
     """Run the full pipeline: scrape -> transform -> upload to SharePoint."""
     load_dotenv()
 
-    target_folder_env = os.getenv("TARGET_FOLDER_PATH", "").strip()
-    if target_folder_env == "Odoo_1-10_Sep_Testing":
-        print("=" * 60)
-        print("Special mode: Running September 1-10 Parking & Odoo pipeline...")
-        print("Target SharePoint folder: Odoo_1-10_Sep_Testing")
-        print("=" * 60)
-        import scrape_sep_1_10
-        asyncio.run(scrape_sep_1_10.scrape_sep_1_10())
-        scrape_sep_1_10.transform_to_odoo()
-        scrape_sep_1_10.upload_to_sharepoint()
-        print("\n" + "=" * 60)
-        print("September 1-10 pipeline complete.")
-        print("=" * 60)
-        return
-
     print("=" * 60)
     print("Step 1/4: Scraping SKIDATA reports...")
     print("=" * 60)
