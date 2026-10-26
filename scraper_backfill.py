@@ -129,16 +129,20 @@ async def select_calendar_month_range(
         if seen_dates and min(seen_dates) < start_date:
             break
 
-        # Scroll down in virtual listbox
-        try:
-            if items:
+        # Virtual scroll down: scroll the last visible item into view
+        if items:
+            try:
                 await items[-1].scroll_into_view_if_needed()
+            except Exception:
+                pass
+        # Fallback element scroll if available, wrapped safely
+        try:
+            await list_frame.eval_on_selector(
+                "div.RowColumn-scrollContainer, div.lui-virtual-scroll, div.lui-list, div[role='listbox']",
+                "el => el.scrollBy(0, 300)"
+            )
         except Exception:
             pass
-        await list_frame.eval_on_selector(
-            "div.RowColumn-scrollContainer, div.lui-virtual-scroll, div.lui-list",
-            "el => el.scrollBy(0, 300)"
-        )
         await asyncio.sleep(0.4)
 
     print(f"Selected {selected_count} day(s) for range {start_date} -> {end_date}.")
