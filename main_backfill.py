@@ -1,35 +1,44 @@
 """
-SKIDATA Historical Backfill Pipeline Orchestrator
-------------------------------------------------
-Orchestrates downloading, cleaning, and uploading of historical monthly reports:
-  - August 2026   -> SharePoint 'Validated_Docs/old/Aug'
-  - September 2026 -> SharePoint 'Validated_Docs/old/Sep'
+SKIDATA Historical & Range Backfill Pipeline Orchestrator
+---------------------------------------------------------
+Orchestrates downloading, cleaning, and uploading of historical monthly or custom date range reports:
+  - By Month:
+      August 2026   -> SharePoint 'Validated_Docs/old/Aug'
+      September 2026 -> SharePoint 'Validated_Docs/old/Sep'
+      July 2026      -> SharePoint 'Validated_Docs/old/Jul'
+      Any other month...
+  - By Date Range:
+      10-10-2026 to 23-10-2026 -> SharePoint 'Validated_Docs/old/10-Oct-26-to-23-Oct-26'
+      (Automatically creates the folder in Validated_Docs/old/ by range name!)
 
-Each month contains all 4 core tables:
+Each run downloads all 4 core tables:
   1. Access In Depth Analysis
   2. Parking Transactions
   3. Revenue In Depth Analysis
   4. System Event In Depth Analysis
 
-Usage:
-  # Download and upload both August and September 2026
+Usage Examples:
+  # Download August and September 2026:
   python main_backfill.py --month both
 
-  # August 2026 only
+  # Download specific month:
   python main_backfill.py --month August
-
-  # September 2026 only
   python main_backfill.py --month September
 
-  # Dry run locally without uploading to SharePoint
-  python main_backfill.py --month both --no-upload
+  # Download custom date range:
+  python main_backfill.py --range "10-10-2026 to 23-10-2026"
+
+  # Dry run locally without uploading to SharePoint:
+  python main_backfill.py --month August --no-upload
 """
 import argparse
 import asyncio
+import calendar
 import os
+import re
 import shutil
 import sys
-from datetime import date
+from datetime import date, datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -38,26 +47,120 @@ from scraper_backfill import scrape_month
 from Transformer_backfill import run as transform_backfill
 from To_Sharepoint_backfill import main as upload_backfill
 
-MONTH_SPECS = {
-    "august": {
-        "name": "August 2026",
-        "start_date": date(2026, 8, 1),
-        "end_date": date(2026, 8, 31),
-        "file_prefix": "01-Aug-26-to-31-Aug-26",
-        "sharepoint_folder": "Validated_Docs/old/Aug",
-        "local_exports": "exports_backfill/Aug",
-        "local_cleaned": "Cleaned-Exports-Backfill/Aug",
-    },
-    "september": {
-        "name": "September 2026",
-        "start_date": date(2026, 9, 1),
-        "end_date": date(2026, 9, 30),
-        "file_prefix": "01-Sep-26-to-30-Sep-26",
-        "sharepoint_folder": "Validated_Docs/old/Sep",
-        "local_exports": "exports_backfill/Sep",
-        "local_cleaned": "Cleaned-Exports-Backfill/Sep",
-    },
+MONTH_MAP = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
 }
+
+
+def parse_single_date(text: str) -> date:
+    text = text.strip()
+    for fmt in [
+        "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y",
+        "%d-%b-%Y", "%d-%b-%y", "%d-%B-%Y", "%Y/%m/%d",
+    ]:
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            pass
+    raise ValueError(f"Could not parse date: '{text}'. Use DD-MM-YYYY or YYYY-MM-DD.")
+
+
+def parse_date_range(range_str: str) -> tuple[date, date, str, str]:
+    """Parse string like '10-10-2026 to 23-10-2026' into start_date, end_date, file_prefix, folder_name."""
+    delimiters = [" to ", " - ", " -> ", "..", ","]
+    parts = None
+    for d in delimiters:
+        if d in range_str:
+            parts = range_str.split(d, 1)
+            break
+    if not parts or len(parts) != 2:
+        raise ValueError(f"Invalid range format: '{range_str}'. Expected 'start to end', e.g. '10-10-2026 to 23-10-2026'")
+
+    start_d = parse_single_date(parts[0])
+    end_d = parse_single_date(parts[1])
+    if start_d > end_d:
+        start_d, end_d = end_d, start_d
+
+    # Prefix matches standard SharePoint reference: e.g. 10-Oct-26-to-23-Oct-26
+    start_str = start_d.strftime("%d-%b-%y")
+    end_str = end_d.strftime("%d-%b-%y")
+    file_prefix = f"{start_str}-to-{end_str}"
+    folder_name = file_prefix
+    return start_d, end_d, file_prefix, folder_name
+
+
+def parse_month_spec(raw: str, default_year: int = 2026) -> tuple[date, date, str, str]:
+    """Parse month name like 'August', 'Sep 2026', 'July' into start_date, end_date, prefix, folder."""
+    raw = raw.strip()
+    year_match = re.search(r"\b(20\d\d)\b", raw)
+    year = int(year_match.group(1)) if year_match else default_year
+    clean_name = re.sub(r"[^a-zA-Z]", "", raw).lower()
+    if clean_name not in MONTH_MAP:
+        raise ValueError(f"Unrecognized month name: '{raw}'")
+    m_num = MONTH_MAP[clean_name]
+    num_days = calendar.monthrange(year, m_num)[1]
+    start_d = date(year, m_num, 1)
+    end_d = date(year, m_num, num_days)
+    prefix = f"{start_d.strftime('%d-%b-%y')}-to-{end_d.strftime('%d-%b-%y')}"
+    folder_name = start_d.strftime("%b")  # e.g. Aug, Sep, Jul
+    return start_d, end_d, prefix, folder_name
+
+
+def build_pipeline_specs(
+    month: str | None = None,
+    date_range: str | None = None,
+    custom_folder: str | None = None,
+) -> list[dict]:
+    specs = []
+    base_sharepoint_root = "Validated_Docs/old"
+
+    if date_range and date_range.strip():
+        start_d, end_d, prefix, folder_name = parse_date_range(date_range)
+        sp_folder = custom_folder or f"{base_sharepoint_root}/{folder_name}"
+        specs.append({
+            "name": f"Range ({prefix})",
+            "start_date": start_d,
+            "end_date": end_d,
+            "file_prefix": prefix,
+            "sharepoint_folder": sp_folder,
+            "local_exports": os.path.join("exports_backfill", folder_name),
+            "local_cleaned": os.path.join("Cleaned-Exports-Backfill", folder_name),
+        })
+        return specs
+
+    m_raw = (month or "both").strip().lower()
+    if m_raw in ("both", "all"):
+        months_to_parse = ["august 2026", "september 2026"]
+    elif "," in m_raw:
+        months_to_parse = [m.strip() for m in m_raw.split(",") if m.strip()]
+    else:
+        months_to_parse = [m_raw]
+
+    for m in months_to_parse:
+        start_d, end_d, prefix, folder_name = parse_month_spec(m)
+        sp_folder = custom_folder or f"{base_sharepoint_root}/{folder_name}"
+        specs.append({
+            "name": f"{folder_name} {start_d.year}",
+            "start_date": start_d,
+            "end_date": end_d,
+            "file_prefix": prefix,
+            "sharepoint_folder": sp_folder,
+            "local_exports": os.path.join("exports_backfill", folder_name),
+            "local_cleaned": os.path.join("Cleaned-Exports-Backfill", folder_name),
+        })
+
+    return specs
 
 
 def clean_and_stage(src_dir: str, dst_dir: str):
@@ -138,13 +241,24 @@ async def execute_month_pipeline(spec: dict, sheet_filter: str, headless: bool, 
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SKIDATA Historical Backfill Pipeline")
+    parser = argparse.ArgumentParser(description="SKIDATA Historical / Range Backfill Pipeline")
     parser.add_argument(
         "--month",
         type=str,
         default="both",
-        choices=["august", "september", "both", "all", "aug", "sep"],
-        help="Target month (default: both)",
+        help="Target month (e.g. 'both', 'August', 'September', 'Aug', 'Sep', 'July'). Default: both",
+    )
+    parser.add_argument(
+        "--range",
+        type=str,
+        default="",
+        help="Date range (e.g. '10-10-2026 to 23-10-2026'). If provided, overrides --month.",
+    )
+    parser.add_argument(
+        "--folder",
+        type=str,
+        default="",
+        help="Custom SharePoint destination folder (overrides default 'Validated_Docs/old/<Folder>')",
     )
     parser.add_argument(
         "--sheet",
@@ -157,16 +271,22 @@ def main():
     parser.add_argument("--no-upload", action="store_true", default=False, help="Skip SharePoint upload")
     args = parser.parse_args()
 
-    # Normalize month selection
-    target = args.month.lower()
-    if target in ("aug", "august"):
-        months_to_run = [MONTH_SPECS["august"]]
-    elif target in ("sep", "september"):
-        months_to_run = [MONTH_SPECS["september"]]
-    else:
-        months_to_run = [MONTH_SPECS["august"], MONTH_SPECS["september"]]
+    # Build dynamic pipeline specifications
+    specs_to_run = build_pipeline_specs(
+        month=args.month,
+        date_range=args.range,
+        custom_folder=args.folder if args.folder.strip() else None,
+    )
 
-    for spec in months_to_run:
+    print("\n" + "=" * 65)
+    print(f"HISTORICAL / RANGE BACKFILL INITIALIZED ({len(specs_to_run)} task(s))")
+    for s in specs_to_run:
+        print(f"  - {s['name']}: {s['start_date']} -> {s['end_date']}")
+        print(f"    Prefix:     {s['file_prefix']}")
+        print(f"    SharePoint: {s['sharepoint_folder']}")
+    print("=" * 65)
+
+    for spec in specs_to_run:
         asyncio.run(
             execute_month_pipeline(
                 spec=spec,
@@ -177,7 +297,7 @@ def main():
         )
 
     print("\n" + "#" * 65)
-    print("# ALL HISTORICAL BACKFILL TASKS FINISHED SUCCESSFULLY!")
+    print("# ALL HISTORICAL / RANGE BACKFILL TASKS FINISHED SUCCESSFULLY!")
     print("#" * 65)
 
 

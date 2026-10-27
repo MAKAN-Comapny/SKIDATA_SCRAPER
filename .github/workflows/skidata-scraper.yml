@@ -2,18 +2,38 @@ name: SKIDATA Scraper
 
 on:
   workflow_dispatch:
-    # Allow manual trigger from GitHub Actions tab
+    # Allow manual trigger with flexible options
     inputs:
-      target_date:
-        description: "Day to export, YYYY-MM-DD. Leave empty for rolling window."
+      mode:
+        description: "Option to Run: 'daily' (Last 5 days -> Ski Data 5) or 'historical' (Month/Range -> Validated_Docs)"
+        required: false
+        default: "daily"
+        type: choice
+        options:
+          - daily
+          - historical
+      month:
+        description: "Historical Month: 'both', 'August', 'September', 'Jul', etc. (Used if mode=historical)"
+        required: false
+        default: "both"
+      date_range:
+        description: "Historical Date Range: e.g. '10-10-2026 to 23-10-2026' (Overrides month if set)"
+        required: false
+        default: ""
+      folder:
+        description: "Historical Destination Folder override (default: Validated_Docs/old/<Folder>)"
         required: false
         default: ""
       days_count:
-        description: "Number of rolling days to export (default: 5)."
+        description: "Daily Script: Number of rolling past days to fetch (default: 5)"
         required: false
         default: "5"
+      target_date:
+        description: "Daily Script: Specific single date (YYYY-MM-DD), leave empty for rolling days"
+        required: false
+        default: ""
       target_folder:
-        description: "Target folder: 'Ski Data 5' (daily) or 'Validated_Docs' (Aug & Sep backfill)"
+        description: "Legacy folder override ('Ski Data 5' or 'Validated_Docs')"
         required: false
         default: "Ski Data 5"
   repository_dispatch:
@@ -30,6 +50,7 @@ concurrency:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
 
     steps:
       - name: Checkout repository
@@ -65,9 +86,21 @@ jobs:
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
           SHAREPOINT_SITE_NAME: ${{ secrets.SHAREPOINT_SITE_NAME }}
         run: |
-          if [ "${{ inputs.target_folder }}" = "Validated_Docs" ]; then
-            echo "Running Historical Backfill for August & September -> Validated_Docs..."
-            python main_backfill.py --month both --headless
+          if [ "${{ inputs.mode }}" = "historical" ] || [ "${{ inputs.target_folder }}" = "Validated_Docs" ]; then
+            echo "=========================================================="
+            echo "RUNNING HISTORICAL / RANGE DATA SCRIPT"
+            echo "Target SharePoint: Validated_Docs/old/"
+            echo "=========================================================="
+            if [ -n "${{ inputs.date_range }}" ]; then
+              python main_backfill.py --range "${{ inputs.date_range }}" --headless
+            elif [ -n "${{ inputs.folder }}" ]; then
+              python main_backfill.py --month "${{ inputs.month || 'both' }}" --folder "${{ inputs.folder }}" --headless
+            else
+              python main_backfill.py --month "${{ inputs.month || 'both' }}" --headless
+            fi
           else
+            echo "=========================================================="
+            echo "RUNNING DAILY SCRIPT (Rolling past days -> Ski Data 5)"
+            echo "=========================================================="
             python main.py
           fi
