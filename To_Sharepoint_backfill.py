@@ -153,11 +153,13 @@ def main(target_folder: str | None = None, source_dir: str | None = None):
         )
 
     if not os.path.isdir(source):
-        raise SystemExit(f"Folder '{source}' not found. Run Transformer_backfill.py first.")
+        print(f"Notice: Folder '{source}' not found. Nothing to upload.")
+        return
 
     files = sorted(glob.glob(os.path.join(source, "*.xlsx")))
     if not files:
-        raise SystemExit(f"No .xlsx files in '{source}'.")
+        print(f"Notice: No .xlsx files found in '{source}' to upload.")
+        return
 
     print(f"Uploading backfill files to SharePoint folder: '{target}'...")
     token = get_access_token()
@@ -166,9 +168,18 @@ def main(target_folder: str | None = None, source_dir: str | None = None):
     ensure_folder_path(site_id, headers, target)
 
     print(f"Uploading {len(files)} file(s)...")
+    import time
     for fp in files:
-        result = upload_file(site_id, headers, fp, target)
-        print(f"  Uploaded: {os.path.basename(fp)} ({os.path.getsize(fp):,} bytes) -> {target}/")
+        for attempt in range(3):
+            try:
+                result = upload_file(site_id, headers, fp, target)
+                print(f"  Uploaded: {os.path.basename(fp)} ({os.path.getsize(fp):,} bytes) -> {target}/")
+                break
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                print(f"  Upload attempt {attempt+1} failed for {os.path.basename(fp)} ({e}), retrying in 3s...")
+                time.sleep(3)
 
     print(f"\nAll files successfully uploaded to '{target}' on SharePoint!")
 

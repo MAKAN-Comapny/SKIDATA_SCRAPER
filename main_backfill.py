@@ -66,7 +66,11 @@ def clean_and_stage(src_dir: str, dst_dir: str):
     import glob
 
     os.makedirs(dst_dir, exist_ok=True)
-    all_files = glob.glob(os.path.join(src_dir, "*.xlsx"))
+    # Only stage main month files, skip any internal daily chunk folder
+    all_files = [
+        f for f in glob.glob(os.path.join(src_dir, "*.xlsx"))
+        if os.path.isfile(f) and "daily_chunks" not in f
+    ]
     print(f"\nCleaning and staging {len(all_files)} file(s) from {src_dir} -> {dst_dir}...")
 
     for f in all_files:
@@ -112,6 +116,8 @@ async def execute_month_pipeline(spec: dict, sheet_filter: str, headless: bool, 
             sheet_filter=sheet_filter,
             headless=headless,
         )
+    except Exception as scrape_err:
+        print(f"\n[NOTICE] Scraping encountered an issue: {scrape_err}")
     finally:
         # 2. Clean and Stage downloaded files
         clean_and_stage(spec["local_exports"], spec["local_cleaned"])
@@ -121,7 +127,7 @@ async def execute_month_pipeline(spec: dict, sheet_filter: str, headless: bool, 
             print(f"\nUploading available files to SharePoint: {spec['sharepoint_folder']}...")
             try:
                 upload_backfill(target_folder=spec["sharepoint_folder"], source_dir=spec["local_cleaned"])
-            except Exception as up_err:
+            except (Exception, SystemExit) as up_err:
                 print(f"SharePoint upload error: {up_err}")
         else:
             print(f"\nUpload skipped (--no-upload). Files saved locally in {spec['local_cleaned']}/")

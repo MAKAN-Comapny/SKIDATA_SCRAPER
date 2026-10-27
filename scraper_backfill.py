@@ -83,6 +83,76 @@ async def find_frame_with_selector(
     return None
 
 
+DOWNLOAD_LINK_SELECTORS = [
+    "a.export-url",
+    "a:has-text('download your data file')",
+    "a:has-text('Click here')",
+    "a[href*='tempcontent']",
+    ".lui-dialog a",
+]
+
+MODAL_EXPORT_BUTTON_SELECTORS = [
+    "button.lui-button:has-text('Export')",
+    "button:has-text('Export')",
+    ".lui-dialog button:has-text('Export')",
+    "button[title='Export']",
+    "span.lui-button__text:has-text('Export')",
+]
+
+
+async def find_element_across_all(page: Page, selectors: list[str]) -> Optional[tuple[any, Page | Frame]]:
+    """Search main page and all frames for first visible element matching any of the selectors."""
+    roots = [page] + list(page.frames)
+    for root in roots:
+        for sel in selectors:
+            try:
+                elements = await root.query_selector_all(sel)
+                for el in elements:
+                    if await el.is_visible():
+                        return el, root
+            except Exception:
+                pass
+    return None
+
+
+async def wait_for_element_across_all(
+    page: Page,
+    selectors: list[str],
+    timeout_s: float = 60.0,
+    check_interval: float = 0.5,
+) -> Optional[tuple[any, Page | Frame]]:
+    """Wait until an element matching any selector appears in page or frames."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        found = await find_element_across_all(page, selectors)
+        if found is not None:
+            return found
+        await asyncio.sleep(check_interval)
+    return None
+
+
+async def clear_qlik_selections(page: Page) -> None:
+    """Clear any active selections in Qlik."""
+    for root in [page] + list(page.frames):
+        try:
+            for sel in [
+                "button[data-testid='actions-toolbar-clear']",
+                "button[title='Clear selection']",
+                "div.qv-subtoolbar-button:has-text('Date') button.lui-icon--close",
+                "button[title='Clear all selections']",
+                "span.lui-icon--clear-selections",
+                ".lui-icon--close",
+            ]:
+                btns = await root.query_selector_all(sel)
+                for b in btns:
+                    if await b.is_visible():
+                        await b.click(force=True)
+                        await asyncio.sleep(0.5)
+                        return
+        except Exception:
+            pass
+
+
 async def select_calendar_month_range(
     page: Page,
     list_frame: Frame,
@@ -254,17 +324,96 @@ async def run_in_depth_flow(
 
     # 5) Wait for export link
     print("Waiting for export link...")
-    export_link_selector = "a.export-url"
-    export_frame = await find_frame_with_selector(page, export_link_selector, total_timeout_ms=300_000)
-    if export_frame is None:
+    link_res = await wait_for_element_across_all(page, DOWNLOAD_LINK_SELECTORS, timeout_s=300.0)
+    if link_res is None:
         raise RuntimeError("Export link did not appear in time.")
+    download_link, _ = link_res
 
     os.makedirs(download_dir, exist_ok=True)
     async with page.expect_download(timeout=180_000) as download_info:
-        await export_frame.click(export_link_selector)
+        await download_link.click(force=True)
     download = await download_info.value
     await download.save_as(target_path)
     print(f"Download complete: {target_path} ({os.path.getsize(target_path):,} bytes)")
+
+
+async def export_single_day_parking(
+    page: Page,
+    target_date: date,
+    chunk_path: str,
+    header_selector: str,
+) -> None:
+    """Exports a single day from Parking Transactions sheet."""
+    # 1. Clear any active selections
+    await clear_qlik_selections(page)
+    await asyncio.sleep(1)
+
+    # 2. Open Date filter
+    date_filter_selector = "div[data-testid='collapsed-title-Date']"
+    date_frame = await find_frame_with_selector(page, date_filter_selector, per_frame_timeout_ms=5000, total_timeout_ms=15_000)
+    if date_frame is None:
+        date_filter_selector = "h6[aria-label='Date']"
+        date_frame = await find_frame_with_selector(page, date_filter_selector, per_frame_timeout_ms=5000, total_timeout_ms=15_000)
+    if date_frame:
+        await date_frame.click(date_filter_selector)
+        await asyncio.sleep(0.8)
+
+    listbox_base = "div.RowColumn-barContainer[data-testid='listbox.item']"
+    list_frame = await find_frame_with_selector(page, listbox_base, per_frame_timeout_ms=5000, total_timeout_ms=15_000)
+    if not list_frame:
+        raise RuntimeError(f"Date listbox not found for day {target_date}.")
+
+    # 3. Select single date
+    await select_calendar_month_range(page, list_frame, listbox_base, target_date, target_date)
+    await asyncio.sleep(2)
+
+    # 4. Right click table header
+    pivot_frame = await find_frame_with_selector(page, header_selector, per_frame_timeout_ms=10_000, total_timeout_ms=30_000)
+    if pivot_frame is None:
+        pivot_frame = await find_frame_with_selector(
+            page, "article:not(.qv-object-filterpane) header.qv-object-header", per_frame_timeout_ms=10_000, total_timeout_ms=30_000
+        )
+    pivot_header = await pivot_frame.query_selector(header_selector) or await pivot_frame.query_selector("article:not(.qv-object-filterpane) header.qv-object-header")
+    await pivot_header.scroll_into_view_if_needed()
+    await pivot_header.click(button="right")
+    await asyncio.sleep(0.5)
+
+    # 5. Export -> Data
+    export_frame_menu = await find_frame_with_selector(page, "li#export-group", per_frame_timeout_ms=5000, total_timeout_ms=15_000)
+    await export_frame_menu.click("li#export-group")
+    await asyncio.sleep(0.5)
+
+    export_item = await export_frame_menu.wait_for_selector("li#export", timeout=30_000)
+    await export_item.click()
+    await asyncio.sleep(1.2)
+
+    # 6. Click Export in modal
+    btn_res = await wait_for_element_across_all(page, MODAL_EXPORT_BUTTON_SELECTORS, timeout_s=10.0)
+    if btn_res is not None:
+        btn, _ = btn_res
+        await btn.click(force=True)
+    else:
+        await page.keyboard.press("Enter")
+
+    # 7. Wait for download link
+    link_res = await wait_for_element_across_all(page, DOWNLOAD_LINK_SELECTORS, timeout_s=90.0, check_interval=1.0)
+    if link_res is None:
+        raise RuntimeError(f"Export link not found for day {target_date}.")
+    link_el, _ = link_res
+
+    os.makedirs(os.path.dirname(chunk_path), exist_ok=True)
+    async with page.expect_download(timeout=90_000) as dl_info:
+        await link_el.click(force=True)
+    dl = await dl_info.value
+    await dl.save_as(chunk_path)
+    print(f"    Saved: {os.path.basename(chunk_path)} ({os.path.getsize(chunk_path):,} bytes)")
+
+    # 8. Close modal
+    close_res = await find_element_across_all(page, ["button:has-text('Close')"])
+    if close_res:
+        c_btn, _ = close_res
+        await c_btn.click(force=True)
+    await asyncio.sleep(1)
 
 
 async def run_parking_transactions_flow(
@@ -275,6 +424,8 @@ async def run_parking_transactions_flow(
     file_prefix: str,
 ) -> None:
     """Open Parking Transactions sheet, apply date filter, and export data."""
+    import pandas as pd
+
     target_path = os.path.join(download_dir, f"{file_prefix}-Parking-Transactions.xlsx")
     if os.path.exists(target_path) and os.path.getsize(target_path) > 10_000:
         print(f"Skipping {os.path.basename(target_path)} (already exists: {os.path.getsize(target_path):,} bytes).")
@@ -339,73 +490,85 @@ async def run_parking_transactions_flow(
 
     # 3.5) Click modal Export button (check main page and all frames)
     print("Looking for Export dialog button...")
-    clicked_export = False
-    for attempt in range(12):
-        # Check main page
-        btns = await page.query_selector_all("button:has-text('Export')")
-        for b in btns:
-            if await b.is_visible():
-                await b.click(force=True)
-                clicked_export = True
-                print("  Clicked Export button on main page dialog.")
-                break
-        if clicked_export:
-            break
-
-        # Check subframes
-        for frame in page.frames:
-            try:
-                b = await frame.query_selector("button:has-text('Export')")
-                if b and await b.is_visible():
-                    await b.click(force=True)
-                    clicked_export = True
-                    print(f"  Clicked Export button in frame.")
-                    break
-            except Exception:
-                pass
-        if clicked_export:
-            break
-        await asyncio.sleep(1)
-
-    if not clicked_export:
+    btn_res = await wait_for_element_across_all(page, MODAL_EXPORT_BUTTON_SELECTORS, timeout_s=15.0)
+    if btn_res is not None:
+        btn, _ = btn_res
+        await btn.scroll_into_view_if_needed()
+        await btn.click(force=True)
+        print("  Clicked Export button on dialog.")
+    else:
         print("  Notice: Explicit modal button not found, pressing Enter to trigger export...")
         await page.keyboard.press("Enter")
 
-    # 4) Download link
+    # 4) Wait for download link (try full month single export up to 90 seconds)
     print("Waiting for Parking Transactions export to generate...")
-    export_link_selector = "a.export-url"
-    export_frame = await find_frame_with_selector(page, export_link_selector, total_timeout_ms=300_000, per_frame_timeout_ms=3_000)
-    if export_frame is None:
-        # Check if error message appeared in dialog
-        err_msg = ""
-        for frame in page.frames:
+    link_res = await wait_for_element_across_all(page, DOWNLOAD_LINK_SELECTORS, timeout_s=90.0, check_interval=1.0)
+    if link_res is not None:
+        download_link, _ = link_res
+        os.makedirs(download_dir, exist_ok=True)
+        async with page.expect_download(timeout=180_000) as download_info:
+            await download_link.click(force=True)
+        download = await download_info.value
+        await download.save_as(target_path)
+        print(f"Parking Transactions single export complete: {target_path} ({os.path.getsize(target_path):,} bytes)")
+
+        # Close modal
+        close_res = await find_element_across_all(page, ["button:has-text('Close')"])
+        if close_res:
+            c_btn, _ = close_res
+            await c_btn.click(force=True)
+        return
+
+    # If full month export didn't return a link in 90 seconds (Qlik 100k row limit reached), fallback to day-by-day:
+    print("\n" + "!" * 65)
+    print("Full-month single export timed out or exceeded Qlik calculation limit.")
+    print("Activating day-by-day extraction and consolidating with pandas...")
+    print("!" * 65)
+
+    # Close any open export dialogs
+    close_res = await find_element_across_all(page, ["button:has-text('Close')", "button:has-text('Cancel')"])
+    if close_res:
+        c_btn, _ = close_res
+        await c_btn.click(force=True)
+    await asyncio.sleep(1)
+
+    chunk_dir = os.path.join(download_dir, "daily_chunks")
+    os.makedirs(chunk_dir, exist_ok=True)
+    total_days = (end_date - start_date).days + 1
+    all_dates = [start_date + timedelta(days=i) for i in range(total_days)]
+
+    day_files = []
+    for idx, d in enumerate(all_dates, 1):
+        day_str = d.strftime("%d-%b-%y")
+        chunk_file = os.path.join(chunk_dir, f"{day_str}-Parking-Transactions.xlsx")
+
+        if os.path.exists(chunk_file) and os.path.getsize(chunk_file) > 10_000:
+            print(f"  [{idx}/{total_days}] Day {day_str} cached ({os.path.getsize(chunk_file):,} bytes).")
+            day_files.append(chunk_file)
+            continue
+
+        print(f"\n  [{idx}/{total_days}] Fetching day {day_str} ({d})...")
+        for attempt in range(2):
             try:
-                err_el = await frame.query_selector(".lui-dialog__body, .lui-dialog, .qv-object-error")
-                if err_el:
-                    err_msg = await err_el.inner_text()
-                    break
-            except Exception:
-                pass
-        if not err_msg:
-            err_el = await page.query_selector(".lui-dialog__body, .lui-dialog")
-            if err_el:
-                err_msg = await err_el.inner_text()
-        raise RuntimeError(f"Export link did not appear in time. Dialog text: {err_msg or '(none)'}")
+                await export_single_day_parking(page, d, chunk_file, header_selector)
+                day_files.append(chunk_file)
+                break
+            except Exception as day_err:
+                if attempt == 1:
+                    print(f"    [WARNING] Failed to fetch {day_str}: {day_err}")
+                else:
+                    print(f"    Retry {day_str} in 2s...")
+                    await asyncio.sleep(2)
 
-    os.makedirs(download_dir, exist_ok=True)
-    async with page.expect_download(timeout=180_000) as download_info:
-        await export_frame.click(export_link_selector)
-    download = await download_info.value
-    await download.save_as(target_path)
-    print(f"Parking Transactions complete: {target_path} ({os.path.getsize(target_path):,} bytes)")
+    valid_day_files = [f for f in day_files if os.path.exists(f) and os.path.getsize(f) > 10_000]
+    if not valid_day_files:
+        raise RuntimeError(f"No daily parking transactions were extracted for range {start_date} -> {end_date}.")
 
-    # Close modal
-    try:
-        close_btn = await page.query_selector("button:has-text('Close')") or await export_frame.query_selector("button:has-text('Close')")
-        if close_btn:
-            await close_btn.click()
-    except Exception:
-        pass
+    print(f"\nMerging {len(valid_day_files)} daily files into {target_path}...")
+    dfs = [pd.read_excel(f) for f in valid_day_files]
+    merged_df = pd.concat(dfs, ignore_index=True)
+    merged_df.to_excel(target_path, index=False)
+    print(f"SUCCESS: Consolidated {len(merged_df):,} total rows to {target_path} ({os.path.getsize(target_path):,} bytes)!")
 
 
 async def scrape_month(
@@ -491,50 +654,74 @@ async def scrape_month(
 
         # 1. Revenue In Depth
         if sheet_filter in ("all", "revenue"):
-            tab = await open_reports_tab()
-            await run_in_depth_flow(
-                tab, download_dir, "Revenue in Depth Analysis", "Revenue-In-Depth",
-                "header#CwPV_title", start_date, end_date, file_prefix
-            )
-            print("Closing reports tab and returning to portal...")
-            await tab.close()
-            await page.bring_to_front()
-            await asyncio.sleep(2)
+            try:
+                tab = await open_reports_tab()
+                await run_in_depth_flow(
+                    tab, download_dir, "Revenue in Depth Analysis", "Revenue-In-Depth",
+                    "header#CwPV_title", start_date, end_date, file_prefix
+                )
+            except Exception as e:
+                print(f"[ERROR in Revenue In Depth]: {e}")
+            finally:
+                try:
+                    await tab.close()
+                except Exception:
+                    pass
+                await page.bring_to_front()
+                await asyncio.sleep(2)
 
         # 2. Access In Depth
         if sheet_filter in ("all", "access"):
-            tab = await open_reports_tab()
-            await run_in_depth_flow(
-                tab, download_dir, "Access in Depth Analysis", "Access-In-Depth",
-                "header#b8cfe7c0-f39f-45ce-8529-5edd3499c57b_title", start_date, end_date, file_prefix
-            )
-            print("Closing reports tab and returning to portal...")
-            await tab.close()
-            await page.bring_to_front()
-            await asyncio.sleep(2)
+            try:
+                tab = await open_reports_tab()
+                await run_in_depth_flow(
+                    tab, download_dir, "Access in Depth Analysis", "Access-In-Depth",
+                    "header#b8cfe7c0-f39f-45ce-8529-5edd3499c57b_title", start_date, end_date, file_prefix
+                )
+            except Exception as e:
+                print(f"[ERROR in Access In Depth]: {e}")
+            finally:
+                try:
+                    await tab.close()
+                except Exception:
+                    pass
+                await page.bring_to_front()
+                await asyncio.sleep(2)
 
         # 3. System Event In Depth
         if sheet_filter in ("all", "system_events", "events"):
-            tab = await open_reports_tab()
-            await run_in_depth_flow(
-                tab, download_dir, "System Event in Depth Analysis", "System-Event-In-Depth",
-                "header#jKmZn_title", start_date, end_date, file_prefix
-            )
-            print("Closing reports tab and returning to portal...")
-            await tab.close()
-            await page.bring_to_front()
-            await asyncio.sleep(2)
+            try:
+                tab = await open_reports_tab()
+                await run_in_depth_flow(
+                    tab, download_dir, "System Event in Depth Analysis", "System-Event-In-Depth",
+                    "header#jKmZn_title", start_date, end_date, file_prefix
+                )
+            except Exception as e:
+                print(f"[ERROR in System Event In Depth]: {e}")
+            finally:
+                try:
+                    await tab.close()
+                except Exception:
+                    pass
+                await page.bring_to_front()
+                await asyncio.sleep(2)
 
         # 4. Parking Transactions
         if sheet_filter in ("all", "parking", "transactions"):
-            tab = await open_reports_tab()
-            await run_parking_transactions_flow(
-                tab, download_dir, start_date, end_date, file_prefix
-            )
-            print("Closing reports tab and returning to portal...")
-            await tab.close()
-            await page.bring_to_front()
-            await asyncio.sleep(2)
+            try:
+                tab = await open_reports_tab()
+                await run_parking_transactions_flow(
+                    tab, download_dir, start_date, end_date, file_prefix
+                )
+            except Exception as e:
+                print(f"[ERROR in Parking Transactions]: {e}")
+            finally:
+                try:
+                    await tab.close()
+                except Exception:
+                    pass
+                await page.bring_to_front()
+                await asyncio.sleep(2)
 
         await browser.close()
         print(f"\nFinished scraping {month_name}.")
