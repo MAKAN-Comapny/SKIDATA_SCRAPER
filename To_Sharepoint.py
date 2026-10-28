@@ -61,7 +61,11 @@ def get_site_id(headers):
 
 
 def get_target_folder(folder=None):
-    return folder or os.getenv("TARGET_FOLDER_PATH") or TARGET_FOLDER_PATH
+    resolved = folder or os.getenv("TARGET_FOLDER_PATH") or TARGET_FOLDER_PATH
+    if resolved == "Skidata_Daily_Files":
+        print("SAFETY GUARDRAIL: Intercepted upload to 'Skidata_Daily_Files' on dev. Redirecting to 'Ski Data 5'.")
+        resolved = "Ski Data 5"
+    return resolved
 
 
 def ensure_folder_path(site_id, headers, folder=None):

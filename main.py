@@ -53,7 +53,11 @@ def main():
         print("Step 3/4: Skipped Odoo export (SKIP_ODOO_EXPORT=true)...")
         print("=" * 60)
 
-    target_folder = os.getenv("TARGET_FOLDER_PATH") or "Skidata_Daily_Files"
+    target_folder = os.getenv("TARGET_FOLDER_PATH") or "Ski Data 5"
+    if target_folder == "Skidata_Daily_Files":
+        print("SAFETY GUARDRAIL: Blocked upload to 'Skidata_Daily_Files' on dev. Redirecting to 'Ski Data 5'.")
+        target_folder = "Ski Data 5"
+        os.environ["TARGET_FOLDER_PATH"] = "Ski Data 5"
     print("\n" + "=" * 60)
     print(f"Step 4/4: Uploading to SharePoint ({target_folder})...")
     print("=" * 60)
