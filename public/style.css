@@ -1,0 +1,81 @@
+/* SKIDATA Data Operations Portal Custom Styles (Vercel Edition) */
+
+/* Diagram Node States */
+.diagram-node {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.diagram-node.state-idle {
+  border-color: #334155;
+  background-color: #0f172a;
+  box-shadow: none;
+}
+
+.diagram-node.state-running {
+  border-color: #38bdf8;
+  background-color: #0c4a6e;
+  box-shadow: 0 0 20px rgba(56, 189, 248, 0.3);
+  transform: translateY(-2px);
+}
+
+.diagram-node.state-running .node-pill {
+  background-color: #0284c7;
+  color: #ffffff;
+  animation: pulse 1.5s infinite;
+}
+
+.diagram-node.state-completed {
+  border-color: #22c55e;
+  background-color: #064e3b;
+  box-shadow: 0 0 15px rgba(34, 197, 94, 0.2);
+}
+
+.diagram-node.state-completed .node-pill {
+  background-color: #16a34a;
+  color: #ffffff;
+}
+
+.diagram-node.state-failed {
+  border-color: #f43f5e;
+  background-color: #881337;
+  box-shadow: 0 0 15px rgba(244, 63, 94, 0.3);
+}
+
+.diagram-node.state-failed .node-pill {
+  background-color: #e11d48;
+  color: #ffffff;
+}
+
+/* Diagram Connecting Arrows */
+.diagram-arrow.arrow-active {
+  color: #38bdf8;
+  animation: arrowPulse 1s infinite alternate;
+}
+
+.diagram-arrow.arrow-done {
+  color: #22c55e;
+}
+
+@keyframes arrowPulse {
+  0% { transform: scale(1); opacity: 0.7; }
+  100% { transform: scale(1.25); opacity: 1; }
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #020617;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
