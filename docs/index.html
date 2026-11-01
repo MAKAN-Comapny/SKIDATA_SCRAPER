@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SKIDATA Data Operations Portal (GitHub Edition)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="./style.css">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f0fdf4',
+              100: '#dcfce7',
+              500: '#22c55e',
+              600: '#16a34a',
+              700: '#15803d',
+              900: '#14532d',
+            },
+            accent: {
+              500: '#0ea5e9',
+              600: '#0284c7',
+            }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased selection:bg-brand-500 selection:text-white">
+
+  <!-- ================= AUTHENTICATION MODAL ================= -->
+  <div id="loginModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md">
+    <div class="w-full max-w-md p-8 bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl relative overflow-hidden">
+      <div class="absolute -top-24 -right-24 w-48 h-48 bg-brand-500/10 rounded-full blur-3xl"></div>
+      <div class="text-center mb-6">
+        <div class="inline-flex p-4 bg-brand-500/10 rounded-2xl mb-4 border border-brand-500/20 text-brand-500 text-3xl">
+          <i class="fa-solid fa-shield-halved"></i>
+        </div>
+        <h2 class="text-2xl font-bold tracking-tight text-white">SKIDATA Control Plane</h2>
+        <p class="text-xs text-slate-400 mt-1">Enterprise Ingestion & Historical Fill Portal (GitHub Cloud)</p>
+      </div>
+
+      <form id="loginForm" class="space-y-4">
+        <div>
+          <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">Username</label>
+          <div class="relative">
+            <span class="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500"><i class="fa-solid fa-user"></i></span>
+            <input type="text" id="usernameInput" value="admin" required
+              class="w-full pl-10 pr-4 py-2.5 bg-slate-800/80 border border-slate-700/80 rounded-xl focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none text-sm transition">
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">Password</label>
+          <div class="relative">
+            <span class="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500"><i class="fa-solid fa-lock"></i></span>
+            <input type="password" id="passwordInput" value="Makan@2026!" required
+              class="w-full pl-10 pr-4 py-2.5 bg-slate-800/80 border border-slate-700/80 rounded-xl focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none text-sm transition">
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5 flex items-center justify-between">
+            <span>GitHub Personal Access Token</span>
+            <span class="text-[10px] text-brand-400 font-normal">Actions: Read & Write</span>
+          </label>
+          <div class="relative">
+            <span class="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500"><i class="fa-brands fa-github"></i></span>
+            <input type="password" id="ghTokenInput" placeholder="ghp_... (stored only in browser)"
+              class="w-full pl-10 pr-4 py-2.5 bg-slate-800/80 border border-slate-700/80 rounded-xl focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none text-sm transition font-mono">
+          </div>
+          <p class="text-[11px] text-slate-500 mt-1">Needed to dispatch GitHub cloud workflows from this website. Saved in your browser.</p>
+        </div>
+
+        <div id="loginError" class="hidden text-xs text-rose-400 bg-rose-500/10 border border-rose-500/20 p-2.5 rounded-lg"></div>
+
+        <button type="submit"
+          class="w-full py-3 bg-brand-600 hover:bg-brand-500 active:scale-[0.99] text-white font-medium rounded-xl shadow-lg shadow-brand-600/20 transition flex items-center justify-center gap-2">
+          <span>Authenticate & Open Portal</span>
+          <i class="fa-solid fa-arrow-right text-sm"></i>
+        </button>
+      </form>
+      <div class="mt-5 text-center text-xs text-slate-500">
+        Universal Access: <code class="text-slate-400 font-mono">admin / Makan@2026!</code>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= MAIN APP WRAPPER ================= -->
+  <div id="appContainer" class="hidden min-h-screen flex flex-col">
+
+    <!-- Top Navigation Bar -->
+    <header class="border-b border-slate-800 bg-slate-900/60 backdrop-blur sticky top-0 z-40">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 bg-brand-500/15 border border-brand-500/30 rounded-xl flex items-center justify-center text-brand-500 font-bold">
+            <i class="fa-solid fa-database"></i>
+          </div>
+          <div>
+            <span class="font-bold text-white tracking-tight">SKIDATA</span>
+            <span class="text-xs bg-brand-500/20 text-brand-400 px-2 py-0.5 rounded-full ml-1.5 font-medium border border-brand-500/30">GitHub Edition</span>
+            <span class="text-[10px] text-slate-400 ml-2 font-mono hidden sm:inline-block">branch: feature/historic_fill</span>
+          </div>
+        </div>
+
+        <!-- Badges & Controls -->
+        <div class="flex items-center gap-3">
+          <div class="flex items-center gap-2 text-xs bg-slate-800/80 border border-slate-700/80 px-3 py-1.5 rounded-full">
+            <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span class="text-slate-300 font-medium">OPA Engine: Active</span>
+          </div>
+          <div class="flex items-center gap-2 text-xs bg-slate-800/80 border border-slate-700/80 px-3 py-1.5 rounded-full">
+            <i class="fa-solid fa-lock text-slate-400"></i>
+            <span id="queueBadge" class="text-slate-300 font-medium">Queue: Idle</span>
+          </div>
+          <button id="openTokenSettingsBtn" class="text-xs text-slate-400 hover:text-white px-2 py-1 rounded transition" title="Update GitHub Token">
+            <i class="fa-brands fa-github mr-1"></i> <span id="tokenStatusText">Token Configured</span>
+          </button>
+          <button id="logoutBtn" class="text-xs text-slate-400 hover:text-white px-2 py-1 rounded transition">
+            <i class="fa-solid fa-right-from-bracket mr-1"></i> Sign out
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+
+      <!-- Navigation Tabs -->
+      <div class="border-b border-slate-800 flex gap-4">
+        <button id="tabDailyBtn" class="tab-btn active px-5 py-3 border-b-2 border-brand-500 text-brand-400 font-semibold text-sm flex items-center gap-2 transition">
+          <i class="fa-solid fa-calendar-day"></i>
+          <span>Download Current / Latest Data</span>
+        </button>
+        <button id="tabHistBtn" class="tab-btn px-5 py-3 border-b-2 border-transparent text-slate-400 hover:text-slate-200 font-semibold text-sm flex items-center gap-2 transition">
+          <i class="fa-solid fa-clock-rotate-left"></i>
+          <span>Historic Range Fill</span>
+        </button>
+      </div>
+
+      <!-- ================= TAB 1: CURRENT / LATEST DATA ================= -->
+      <div id="tabDailyContent" class="tab-content space-y-6">
+
+        <!-- Info Card: Data Sources & Tables -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div class="md:col-span-2 p-5 bg-slate-900/60 border border-slate-800 rounded-2xl relative overflow-hidden">
+            <h3 class="text-base font-semibold text-white flex items-center gap-2 mb-2">
+              <i class="fa-solid fa-cloud-arrow-down text-brand-500"></i>
+              Data Source: SkiData Qlik Sense Cloud
+            </h3>
+            <p class="text-xs text-slate-400 leading-relaxed">
+              Automated read-only extraction pulls rolling 5-day transactions directly from SkiData analytics hub.
+              Guaranteed 100% read-only session &mdash; no writes or edits to the SkiData source.
+            </p>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4 text-xs">
+              <div class="p-2.5 bg-slate-800/60 rounded-xl border border-slate-700/50">
+                <span class="text-slate-400 block text-[10px] uppercase font-bold">Table 1</span>
+                <span class="font-medium text-slate-200">Revenue In Depth</span>
+              </div>
+              <div class="p-2.5 bg-slate-800/60 rounded-xl border border-slate-700/50">
+                <span class="text-slate-400 block text-[10px] uppercase font-bold">Table 2</span>
+                <span class="font-medium text-slate-200">Access In Depth</span>
+              </div>
+              <div class="p-2.5 bg-slate-800/60 rounded-xl border border-slate-700/50">
+                <span class="text-slate-400 block text-[10px] uppercase font-bold">Table 3</span>
+                <span class="font-medium text-slate-200">System Event</span>
+              </div>
+              <div class="p-2.5 bg-slate-800/60 rounded-xl border border-slate-700/50">
+                <span class="text-slate-400 block text-[10px] uppercase font-bold">Table 4</span>
+                <span class="font-medium text-slate-200">Parking Transactions</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="p-5 bg-slate-900/60 border border-slate-800 rounded-2xl flex flex-col justify-between">
+            <div>
+              <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Execution Mode</span>
+              <h4 class="text-base font-bold text-white">5-Day Rolling Buffer</h4>
+              <p class="text-xs text-slate-400 mt-1">Extracts past 5 days buffer to capture late-synced barrier gate & parking ticket transactions.</p>
+            </div>
+            <div class="mt-4 flex items-center gap-2 text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-2 rounded-xl">
+              <i class="fa-solid fa-check-circle"></i>
+              <span>100% Read-Only Safety Protocol</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Destination Folder & Controls -->
+        <div class="p-6 bg-slate-900/80 border border-slate-800 rounded-2xl space-y-4">
+          <div>
+            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5 flex items-center justify-between">
+              <span>SharePoint Destination Folder</span>
+              <span class="text-[11px] text-slate-400 font-normal">Default: Validated_Docs/old (or paste custom path/SharePoint URL)</span>
+            </label>
+            <div class="relative">
+              <span class="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500"><i class="fa-solid fa-folder-tree"></i></span>
+              <input type="text" id="dailyFolderInput" value="Validated_Docs/old"
+                class="w-full pl-10 pr-32 py-3 bg-slate-800/90 border border-slate-700 rounded-xl text-sm font-mono text-slate-200 outline-none focus:border-brand-500 transition">
+              <button id="verifyDailyFolderBtn" class="absolute right-2 top-2 bottom-2 px-3 bg-slate-700 hover:bg-slate-600 text-xs font-medium text-white rounded-lg transition">
+                Check Folder
+              </button>
+            </div>
+
+            <!-- Folder Accessibility Status Badge -->
+            <div id="dailyFolderStatus" class="mt-2 text-xs flex items-center gap-1.5 font-medium text-slate-400">
+              <span id="dailyFolderStatusText">Ready</span>
+            </div>
+          </div>
+
+          <div class="pt-2 flex items-center justify-between border-t border-slate-800/80">
+            <div class="text-xs text-slate-400">
+              <i class="fa-solid fa-shield text-brand-500 mr-1"></i> OPA Rules Guard: Production daily folders locked.
+            </div>
+            <button id="runDailyBtn"
+              class="px-6 py-3 bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl shadow-lg shadow-brand-600/20 transition flex items-center gap-2">
+              <i class="fa-solid fa-play text-xs"></i>
+              <span>Run Daily Ingestion Workflow</span>
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ================= TAB 2: HISTORIC RANGE FILL ================= -->
+      <div id="tabHistContent" class="tab-content hidden space-y-6">
+
+        <!-- Mode Selection Pills -->
+        <div class="p-6 bg-slate-900/80 border border-slate-800 rounded-2xl space-y-6">
+          <div>
+            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-3">
+              Select Historical Extraction Mode
+            </label>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <label class="hist-mode-card cursor-pointer p-4 rounded-xl border border-slate-700 bg-slate-800/60 hover:bg-slate-800 transition flex items-start gap-3">
+                <input type="radio" name="histMode" value="months" checked class="mt-1 text-brand-500 focus:ring-brand-500">
+                <div>
+                  <span class="block font-semibold text-white text-sm">Month-Based Batch</span>
+                  <span class="text-xs text-slate-400">Multi-select specific months & years</span>
+                </div>
+              </label>
+
+              <label class="hist-mode-card cursor-pointer p-4 rounded-xl border border-slate-700 bg-slate-800/60 hover:bg-slate-800 transition flex items-start gap-3">
+                <input type="radio" name="histMode" value="range" class="mt-1 text-brand-500 focus:ring-brand-500">
+                <div>
+                  <span class="block font-semibold text-white text-sm">Custom Date Range</span>
+                  <span class="text-xs text-slate-400">Pick starting date and ending date</span>
+                </div>
+              </label>
+
+              <label class="hist-mode-card cursor-pointer p-4 rounded-xl border border-slate-700 bg-slate-800/60 hover:bg-slate-800 transition flex items-start gap-3">
+                <input type="radio" name="histMode" value="single_date" class="mt-1 text-brand-500 focus:ring-brand-500">
+                <div>
+                  <span class="block font-semibold text-white text-sm">Single Historic Date</span>
+                  <span class="text-xs text-slate-400">Extract exactly one calendar day</span>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <!-- Section A: Month-Based Selector -->
+          <div id="sectionMonths" class="space-y-4 pt-2">
+            <!-- Year Selector -->
+            <div>
+              <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Target Year (Multi-Select)</label>
+              <div class="flex gap-3">
+                <label class="cursor-pointer px-4 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs font-medium text-slate-200 flex items-center gap-2 hover:bg-slate-700 transition">
+                  <input type="checkbox" name="histYear" value="2026" checked class="rounded text-brand-500 focus:ring-brand-500">
+                  <span>Year 2026</span>
+                </label>
+                <label class="cursor-pointer px-4 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs font-medium text-slate-200 flex items-center gap-2 hover:bg-slate-700 transition">
+                  <input type="checkbox" name="histYear" value="2025" class="rounded text-brand-500 focus:ring-brand-500">
+                  <span>Year 2025</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- Months Grid -->
+            <div>
+              <div class="flex items-center justify-between mb-2">
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400">Select Months</label>
+                <div class="text-xs space-x-2">
+                  <button type="button" id="selectAllMonthsBtn" class="text-brand-400 hover:underline">Select All</button>
+                  <span class="text-slate-600">|</span>
+                  <button type="button" id="clearAllMonthsBtn" class="text-slate-400 hover:underline">Clear</button>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2" id="monthsGrid">
+                <!-- Javascript injects months -->
+              </div>
+            </div>
+          </div>
+
+          <!-- Section B: Custom Range Selector -->
+          <div id="sectionRange" class="hidden space-y-4 pt-2">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">Starting Date</label>
+                <input type="date" id="rangeStartDate" class="w-full px-4 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-sm text-slate-200 outline-none focus:border-brand-500 transition">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">Ending Date</label>
+                <input type="date" id="rangeEndDate" class="w-full px-4 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-sm text-slate-200 outline-none focus:border-brand-500 transition">
+              </div>
+            </div>
+            <p class="text-xs text-slate-400">
+              <i class="fa-solid fa-circle-info text-accent-500 mr-1"></i>
+              Maximum single job span is 62 days (OPA constraint). Larger historical periods should be broken down by months.
+            </p>
+          </div>
+
+          <!-- Section C: Single Date Selector -->
+          <div id="sectionSingleDate" class="hidden space-y-4 pt-2">
+            <div class="max-w-xs">
+              <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">Select Historic Day (Includes Year)</label>
+              <input type="date" id="singleHistoricDate" class="w-full px-4 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-sm text-slate-200 outline-none focus:border-brand-500 transition">
+            </div>
+          </div>
+
+          <!-- Destination Folder for Historical -->
+          <div class="pt-4 border-t border-slate-800">
+            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5 flex items-center justify-between">
+              <span>SharePoint Historical Archive Folder</span>
+              <span class="text-[11px] text-slate-400 font-normal">Default: Validated_Docs/old (auto-creates subfolder by month or date range)</span>
+            </label>
+            <div class="relative">
+              <span class="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500"><i class="fa-solid fa-folder-open"></i></span>
+              <input type="text" id="histFolderInput" value="Validated_Docs/old"
+                class="w-full pl-10 pr-32 py-3 bg-slate-800/90 border border-slate-700 rounded-xl text-sm font-mono text-slate-200 outline-none focus:border-brand-500 transition">
+              <button id="verifyHistFolderBtn" class="absolute right-2 top-2 bottom-2 px-3 bg-slate-700 hover:bg-slate-600 text-xs font-medium text-white rounded-lg transition">
+                Check Folder
+              </button>
+            </div>
+            <div id="histFolderStatus" class="mt-2 text-xs flex items-center gap-1.5 font-medium text-slate-400">
+              <span id="histFolderStatusText">Ready</span>
+            </div>
+          </div>
+
+          <!-- Launch Button & OPA Badge -->
+          <div class="pt-4 flex items-center justify-between border-t border-slate-800">
+            <div class="text-xs text-slate-400">
+              <span class="text-brand-400 font-semibold"><i class="fa-solid fa-check mr-1"></i> Idempotency Protected:</span>
+              Duplicate jobs within 15 mins will reuse existing results.
+            </div>
+            <button id="runHistBtn"
+              class="px-6 py-3 bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl shadow-lg shadow-brand-600/20 transition flex items-center gap-2">
+              <i class="fa-solid fa-forward text-xs"></i>
+              <span>Start Historical Extraction</span>
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ================= SHARED LIVE ARCHITECTURE & EXECUTION VIEW ================= -->
+      <div id="liveArchitectureCard" class="p-6 bg-slate-900/90 border border-slate-800 rounded-2xl space-y-6">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <h3 class="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+              <i class="fa-solid fa-diagram-project text-brand-500"></i>
+              Live Interactive Architecture & Execution Flow
+            </h3>
+            <p class="text-xs text-slate-400 mt-0.5">Real-time GitHub runner status, table progression, and SharePoint delivery</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span id="jobDurationBadge" class="text-xs px-3 py-1 bg-slate-800 border border-slate-700/80 rounded-full text-slate-400 font-mono">Status: Idle</span>
+          </div>
+        </div>
+
+        <!-- Progress Bar -->
+        <div class="w-full bg-slate-800/80 rounded-full h-2 overflow-hidden border border-slate-700/50">
+          <div id="jobProgressBar" class="bg-brand-500 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+        </div>
+
+        <!-- Dynamic SVG / CSS Architecture Diagram Canvas -->
+        <div class="p-6 bg-slate-950 rounded-xl border border-slate-800/80 overflow-x-auto">
+          <div class="min-w-[840px] flex items-center justify-between gap-3 relative py-4">
+            
+            <!-- Node 1: SkiData Portal -->
+            <div id="node_skidata" class="diagram-node flex-1 p-4 rounded-xl border border-slate-700 bg-slate-900 text-center transition-all duration-300 shadow-md">
+              <div class="w-9 h-9 mx-auto rounded-lg bg-blue-500/10 text-blue-400 flex items-center justify-center mb-2">
+                <i class="fa-solid fa-cloud text-base"></i>
+              </div>
+              <div class="text-xs font-bold text-white">SkiData Cloud Hub</div>
+              <div class="text-[10px] text-slate-400">Qlik Analytics Session</div>
+              <span class="node-pill mt-2 inline-block text-[9px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 font-mono">Idle</span>
+            </div>
+
+            <!-- Animated Arrow 1 -->
+            <div id="arrow_1" class="diagram-arrow text-slate-600 text-xl transition-colors duration-300 px-1">
+              <i class="fa-solid fa-arrow-right"></i>
+            </div>
+
+            <!-- Node 2: Scraper Engine -->
+            <div id="node_scraper" class="diagram-node flex-1 p-4 rounded-xl border border-slate-700 bg-slate-900 text-center transition-all duration-300 shadow-md">
+              <div class="w-9 h-9 mx-auto rounded-lg bg-purple-500/10 text-purple-400 flex items-center justify-center mb-2">
+                <i class="fa-solid fa-robot text-base"></i>
+              </div>
+              <div class="text-xs font-bold text-white">Scraper Engine</div>
+              <div class="text-[10px] text-slate-400">Playwright Ingestion</div>
+              <span class="node-pill mt-2 inline-block text-[9px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 font-mono">Idle</span>
+            </div>
+
+            <!-- Animated Arrow 2 -->
+            <div id="arrow_2" class="diagram-arrow text-slate-600 text-xl transition-colors duration-300 px-1">
+              <i class="fa-solid fa-arrow-right"></i>
+            </div>
+
+            <!-- Node 3: 4 Tables Ingestion -->
+            <div id="node_tables" class="diagram-node flex-1 p-4 rounded-xl border border-slate-700 bg-slate-900 text-center transition-all duration-300 shadow-md">
+              <div class="w-9 h-9 mx-auto rounded-lg bg-amber-500/10 text-amber-400 flex items-center justify-center mb-2">
+                <i class="fa-solid fa-table-cells text-base"></i>
+              </div>
+              <div class="text-xs font-bold text-white">4 Core Tables</div>
+              <div class="text-[10px] text-slate-400">Revenue, Access, Txn</div>
+              <span class="node-pill mt-2 inline-block text-[9px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 font-mono">Idle</span>
+            </div>
+
+            <!-- Animated Arrow 3 -->
+            <div id="arrow_3" class="diagram-arrow text-slate-600 text-xl transition-colors duration-300 px-1">
+              <i class="fa-solid fa-arrow-right"></i>
+            </div>
+
+            <!-- Node 4: Target SharePoint Folder -->
+            <div id="node_destination" class="diagram-node flex-1 p-4 rounded-xl border border-slate-700 bg-slate-900 text-center transition-all duration-300 shadow-md">
+              <div class="w-9 h-9 mx-auto rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center mb-2">
+                <i class="fa-solid fa-folder-circle-check text-base"></i>
+              </div>
+              <div class="text-xs font-bold text-white">SharePoint Target</div>
+              <div id="diagDestFolderText" class="text-[10px] text-slate-400 font-mono truncate px-1" title="Validated_Docs/old">Validated_Docs/old</div>
+              <span class="node-pill mt-2 inline-block text-[9px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 font-mono">Idle</span>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- 4 Tables Progression Indicators -->
+        <div class="p-4 bg-slate-950/60 rounded-xl border border-slate-800/80">
+          <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+            <i class="fa-solid fa-list-check text-brand-500"></i>
+            <span>Table Extraction Status</span>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+            <div id="tblBadge_revenue" class="p-3 bg-slate-900 border border-slate-800 rounded-xl flex items-center justify-between">
+              <span class="text-slate-300 font-medium">Revenue In Depth</span>
+              <span class="status-chip text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400">Pending</span>
+            </div>
+            <div id="tblBadge_access" class="p-3 bg-slate-900 border border-slate-800 rounded-xl flex items-center justify-between">
+              <span class="text-slate-300 font-medium">Access In Depth</span>
+              <span class="status-chip text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400">Pending</span>
+            </div>
+            <div id="tblBadge_system" class="p-3 bg-slate-900 border border-slate-800 rounded-xl flex items-center justify-between">
+              <span class="text-slate-300 font-medium">System Event In Depth</span>
+              <span class="status-chip text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400">Pending</span>
+            </div>
+            <div id="tblBadge_parking" class="p-3 bg-slate-900 border border-slate-800 rounded-xl flex items-center justify-between">
+              <span class="text-slate-300 font-medium">Parking Transactions</span>
+              <span class="status-chip text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400">Pending</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Historical Batch Progress Matrix (Shown for Month-based runs) -->
+        <div id="histBatchProgressCard" class="hidden p-4 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-3">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+              <i class="fa-solid fa-bars-progress text-brand-500"></i>
+              <span>Historical Batch Progression Matrix</span>
+            </span>
+            <span id="histBatchCounter" class="text-xs text-brand-400 font-mono">0 / 0 Completed</span>
+          </div>
+
+          <div id="batchesBadgeGrid" class="flex flex-wrap gap-2">
+            <!-- Dynamically populated per month/year -->
+          </div>
+        </div>
+
+        <!-- Final Result / Notification Banner -->
+        <div id="executionResultBanner" class="hidden p-4 rounded-xl border text-xs">
+          <!-- Dynamically populated upon job completion -->
+        </div>
+
+        <!-- Live Log Console -->
+        <div class="bg-slate-950 rounded-xl border border-slate-800/80 p-4 font-mono text-xs text-slate-300">
+          <div class="flex items-center justify-between pb-2 mb-2 border-b border-slate-800 text-slate-400 text-[11px]">
+            <span><i class="fa-solid fa-terminal mr-1 text-brand-500"></i> Live Execution Log (GitHub Cloud Runner)</span>
+            <div class="flex items-center gap-3">
+              <span id="livePulseIndicator" class="hidden items-center gap-1.5 text-brand-400">
+                <span class="w-1.5 h-1.5 rounded-full bg-brand-400 animate-ping"></span>
+                <span>Active</span>
+              </span>
+              <button id="clearLogsBtn" class="hover:text-white transition">Clear</button>
+            </div>
+          </div>
+          <div id="liveConsole" class="h-44 overflow-y-auto space-y-1 text-slate-400">
+            <p class="text-slate-600">[System idle. Choose workflow and click Run to begin.]</p>
+          </div>
+        </div>
+
+      </div>
+
+    </main>
+
+  </div>
+
+  <script src="./opa_engine.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
