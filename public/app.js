@@ -411,15 +411,30 @@ function renderJobState(job) {
 
   const isRunning = (job.status === "running");
   queueBadge.textContent = `Queue: ${job.status.toUpperCase()}`;
-  durationBadge.textContent = `Run #${job.run_number || job.id || 1} (${job.status.toUpperCase()}) &bull; ${job.progress_percent || 0}%`;
-  progressBar.style.width = `${job.progress_percent || 0}%`;
-
-  if (isRunning) {
-    livePulse.classList.remove("hidden");
-    livePulse.classList.add("inline-flex");
-  } else {
+  
+  if (job.status === "completed") {
+    durationBadge.innerHTML = `<i class="fa-solid fa-circle-check text-emerald-400 mr-1"></i> Run #${job.run_number || job.id || 1} Completed &bull; 100%`;
+    progressBar.style.width = "100%";
+    progressBar.className = "h-full bg-emerald-500 rounded-full transition-all duration-500";
     livePulse.classList.add("hidden");
     livePulse.classList.remove("inline-flex");
+  } else if (job.status === "failed") {
+    durationBadge.innerHTML = `<i class="fa-solid fa-circle-xmark text-rose-400 mr-1"></i> Run #${job.run_number || job.id || 1} Failed`;
+    progressBar.style.width = "100%";
+    progressBar.className = "h-full bg-rose-500 rounded-full transition-all duration-500";
+    livePulse.classList.add("hidden");
+    livePulse.classList.remove("inline-flex");
+  } else {
+    durationBadge.textContent = `Run #${job.run_number || job.id || 1} (${job.status.toUpperCase()}) • ${job.progress_percent || 0}%`;
+    progressBar.style.width = `${job.progress_percent || 0}%`;
+    progressBar.className = "h-full bg-brand-500 rounded-full transition-all duration-500 animate-pulse";
+    if (isRunning) {
+      livePulse.classList.remove("hidden");
+      livePulse.classList.add("inline-flex");
+    } else {
+      livePulse.classList.add("hidden");
+      livePulse.classList.remove("inline-flex");
+    }
   }
 
   // Update Diagram Nodes and Animated Arrows
@@ -477,18 +492,34 @@ function updateDiagramColors(job) {
 
   resetDiagramNodes();
 
+  const setNode = (el, pillText, state) => {
+    el.className = `diagram-node flex-1 p-4 rounded-xl state-${state} text-center shadow-md`;
+    el.querySelector(".node-pill").textContent = pillText;
+  };
+
   if (job.status === "failed") {
-    nodeScraper.className = "diagram-node flex-1 p-4 rounded-xl state-failed text-center shadow-md";
+    setNode(nodeScraper, "Failed", "failed");
+    setNode(nodeDest, "Aborted", "failed");
+    return;
+  }
+
+  // When job is completed, ALL nodes and arrows are immediately set to completed!
+  if (job.status === "completed") {
+    setNode(nodeSkidata, "Connected", "completed");
+    arr1.className = "diagram-arrow arrow-done text-xl px-1";
+
+    setNode(nodeScraper, "Completed", "completed");
+    arr2.className = "diagram-arrow arrow-done text-xl px-1";
+
+    setNode(nodeTables, "All 4 Tables Ready", "completed");
+    arr3.className = "diagram-arrow arrow-done text-xl px-1";
+
+    setNode(nodeDest, "Verified & Saved", "completed");
     return;
   }
 
   const active = job.active_node || "";
   const completed = job.completed_nodes || [];
-
-  const setNode = (el, pillText, state) => {
-    el.className = `diagram-node flex-1 p-4 rounded-xl state-${state} text-center shadow-md`;
-    el.querySelector(".node-pill").textContent = pillText;
-  };
 
   // Node 1: SkiData Hub
   if (active === "skidata_auth") {
@@ -503,28 +534,32 @@ function updateDiagramColors(job) {
   if (active === "scraper_engine") {
     setNode(nodeScraper, "Scraping Active", "running");
     arr2.className = "diagram-arrow arrow-active text-xl px-1";
-  } else if (completed.includes("scraper_engine")) {
+  } else if (completed.includes("scraper_engine") || active.startsWith("table_") || active === "destination_upload") {
     setNode(nodeScraper, "Completed", "completed");
     arr2.className = "diagram-arrow arrow-done text-xl px-1";
   }
 
   // Node 3: Tables Ingestion
   if (active.startsWith("table_")) {
-    setNode(nodeTables, "Fetching Tables", "running");
+    let lbl = "Fetching Tables";
+    if (active === "table_revenue") lbl = "Table 1/4 (Revenue)";
+    else if (active === "table_access") lbl = "Table 2/4 (Access)";
+    else if (active === "table_system") lbl = "Table 3/4 (System Event)";
+    else if (active === "table_parking") lbl = "Table 4/4 (Parking)";
+
+    setNode(nodeTables, lbl, "running");
     arr2.className = "diagram-arrow arrow-done text-xl px-1";
     arr3.className = "diagram-arrow arrow-active text-xl px-1";
-  } else if (completed.some(n => n.startsWith("table_") || n === "all_tables")) {
-    setNode(nodeTables, "All Tables Ready", "completed");
+  } else if (completed.includes("table_parking") || active === "destination_upload") {
+    setNode(nodeTables, "All 4 Tables Ready", "completed");
     arr3.className = "diagram-arrow arrow-done text-xl px-1";
   }
 
   // Node 4: Destination Upload
   if (active === "destination_upload") {
     setNode(nodeDest, "Uploading...", "running");
-  } else if (job.status === "completed") {
-    setNode(nodeDest, "Verified & Saved", "completed");
+    arr3.className = "diagram-arrow arrow-active text-xl px-1";
   }
-}
 
 function resetDiagramNodes() {
   document.querySelectorAll(".diagram-node").forEach(n => {
