@@ -560,6 +560,7 @@ function updateDiagramColors(job) {
     setNode(nodeDest, "Uploading...", "running");
     arr3.className = "diagram-arrow arrow-active text-xl px-1";
   }
+}
 
 function resetDiagramNodes() {
   document.querySelectorAll(".diagram-node").forEach(n => {
