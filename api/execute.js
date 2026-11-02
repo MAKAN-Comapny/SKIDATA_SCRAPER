@@ -17,6 +17,14 @@ const FORBIDDEN_FOLDERS = [
   "ski-data-daily"
 ];
 
+const ALLOWED_ROOTS = [
+  "validated_docs",
+  "ski data 5",
+  "odoo_testing_sumit",
+  "validation_docs",
+  "odoo_aug_sep"
+];
+
 function evaluateOPA(payload) {
   const violations = [];
 
@@ -31,6 +39,8 @@ function evaluateOPA(payload) {
   const rootSeg = folder.split(/[/|\\]/)[0].trim();
   if (FORBIDDEN_FOLDERS.some(f => rootSeg === f || folder === f)) {
     violations.push("OPA-302: Safety Guardrail Triggered - Production daily folders are locked.");
+  } else if (folder && !ALLOWED_ROOTS.some(r => rootSeg === r)) {
+    violations.push(`OPA-303: Folder '${payload.target_folder}' does not exist in SharePoint document library. Permitted destination folders must be inside 'Validated_Docs' or 'Ski Data 5'.`);
   }
 
   // Date range limits
