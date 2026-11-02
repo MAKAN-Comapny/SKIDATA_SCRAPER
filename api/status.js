@@ -4,10 +4,10 @@
  * Queries GitHub Actions API for branch: feature/historic_fill
  */
 
-const REPO_OWNER = "MAKAN-Comapny";
-const REPO_NAME = "SKIDATA_SCRAPER";
-const TARGET_BRANCH = "feature/historic_fill";
-const WORKFLOW_ID = "skidata-scraper.yml";
+const REPO_OWNER = process.env.REPO_OWNER || "MAKAN-Comapny";
+const REPO_NAME = process.env.REPO_NAME || "SKIDATA_SCRAPER";
+const TARGET_BRANCH = process.env.TARGET_BRANCH || "feature/historic_fill";
+const WORKFLOW_ID = process.env.WORKFLOW_ID || "skidata-scraper.yml";
 
 module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
