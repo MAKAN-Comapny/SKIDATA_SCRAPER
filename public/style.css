@@ -80,23 +80,26 @@
   background: #334155;
 }
 
-/* Calendar Datepicker Native Icon - Bright White & Larger */
+/* Calendar Datepicker Native Icon ("Show date picker" symbol) - Pure Bright White & Enlarged */
 input[type="date"] {
   color-scheme: dark;
 }
 
 input[type="date"]::-webkit-calendar-picker-indicator {
   cursor: pointer;
-  filter: invert(1) brightness(2.5);
-  width: 24px;
-  height: 24px;
-  padding: 2px;
-  margin-right: 4px;
-  border-radius: 6px;
-  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), filter 0.2s ease;
+  filter: brightness(0) invert(1) !important;
+  opacity: 1 !important;
+  width: 28px !important;
+  height: 28px !important;
+  min-width: 28px !important;
+  min-height: 28px !important;
+  padding: 2px !important;
+  margin-right: 6px !important;
+  border-radius: 6px !important;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), filter 0.2s ease !important;
 }
 
 input[type="date"]::-webkit-calendar-picker-indicator:hover {
-  transform: scale(1.3);
-  filter: invert(1) brightness(4);
+  transform: scale(1.25) !important;
+  filter: brightness(0) invert(1) drop-shadow(0 0 6px rgba(255, 255, 255, 0.85)) !important;
 }

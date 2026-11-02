@@ -292,6 +292,18 @@ function initHistModeSwitch() {
       secSingle.classList.toggle("hidden", mode !== "single_date");
     });
   });
+
+  // 1-Click calendar picker popup
+  ['rangeStartDate', 'rangeEndDate', 'singleHistoricDate'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener("click", () => {
+        if (typeof el.showPicker === "function") {
+          try { el.showPicker(); } catch (err) {}
+        }
+      });
+    }
+  });
 }
 
 // ================= 5. JOB EXECUTION =================
