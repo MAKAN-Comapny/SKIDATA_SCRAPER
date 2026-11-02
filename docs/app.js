@@ -210,8 +210,8 @@ function verifyHistFolder() {
   const val = input.value.trim();
   const evaluation = opa.evaluate({ mode: "range", start_date: "2026-01-01", end_date: "2026-01-02", target_folder: val, operation: "export" });
 
-  const isFolderBlocked = evaluation.violations.some(v => v.includes("OPA-302") || v.includes("OPA-301"));
-  if (!isFolderBlocked && val.length > 0) {
+  const folderViolations = evaluation.violations.filter(v => v.includes("OPA-301") || v.includes("OPA-302") || v.includes("OPA-303"));
+  if (folderViolations.length === 0 && val.length > 0) {
     const norm = opa.normalizeFolder(val);
     statusText.innerHTML = `<i class="fa-solid fa-circle-check text-emerald-400"></i> Target archive folder ready (${norm})`;
     statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-emerald-400";
@@ -222,7 +222,8 @@ function verifyHistFolder() {
     }
   } else {
     // User requirement: "if not write a message below 'no accessible'"
-    statusText.innerHTML = `<i class="fa-solid fa-circle-xmark text-rose-400"></i> no accessible: Production folders locked.`;
+    const errMsg = folderViolations[0] || 'no accessible: Invalid destination folder';
+    statusText.innerHTML = `<i class="fa-solid fa-circle-xmark text-rose-400"></i> no accessible: ${errMsg}`;
     statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-rose-400";
     runBtn.disabled = true;
   }

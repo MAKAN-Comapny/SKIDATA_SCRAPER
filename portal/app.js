@@ -183,7 +183,9 @@ async function verifyDailyFolder() {
       }
     } else {
       // User requirement: "if not write a message below 'no accessible'"
-      statusText.innerHTML = `<i class="fa-solid fa-circle-xmark text-rose-400"></i> no accessible: ${data.error || 'Access Denied'}`;
+      const err = data.error || 'Access Denied';
+      const msg = err.startsWith('no accessible') ? err : `no accessible: ${err}`;
+      statusText.innerHTML = `<i class="fa-solid fa-circle-xmark text-rose-400"></i> ${msg}`;
       statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-rose-400";
       runBtn.disabled = true;
     }
@@ -237,7 +239,9 @@ async function verifyHistFolder() {
       }
     } else {
       // User requirement: "if not write a message below 'no accessible'"
-      statusText.innerHTML = `<i class="fa-solid fa-circle-xmark text-rose-400"></i> no accessible: ${data.error || 'Access Denied'}`;
+      const err = data.error || 'Access Denied';
+      const msg = err.startsWith('no accessible') ? err : `no accessible: ${err}`;
+      statusText.innerHTML = `<i class="fa-solid fa-circle-xmark text-rose-400"></i> ${msg}`;
       statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-rose-400";
       runBtn.disabled = true;
     }
