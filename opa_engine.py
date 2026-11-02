@@ -96,6 +96,12 @@ class OPAPolicyEngine:
                 "Only staging or old archive folders (e.g. Validated_Docs/old) are permitted."
             )
 
+        if root_seg not in self.ALLOWED_ROOT_FOLDERS:
+            return False, (
+                f"OPA-303: Folder '{folder}' does not exist in SharePoint document library. "
+                "Permitted destination folders must be inside 'Validated_Docs' or 'Ski Data 5'."
+            )
+
         return True, ""
 
     def _rule_date_range_limits(self, req: Dict[str, Any]) -> Tuple[bool, str]:

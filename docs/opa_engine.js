@@ -12,6 +12,13 @@ class OPAPolicyEngine {
       "skidata_odoo",
       "ski-data-daily"
     ];
+    this.ALLOWED_ROOTS = [
+      "validated_docs",
+      "ski data 5",
+      "odoo_testing_sumit",
+      "validation_docs",
+      "odoo_aug_sep"
+    ];
     this.MAX_HISTORICAL_DAYS = 62;
     this.ALLOWED_YEARS = [2024, 2025, 2026];
   }
@@ -54,6 +61,10 @@ class OPAPolicyEngine {
       if (this.FORBIDDEN_FOLDERS.some(f => rootSeg === f || norm === f)) {
         violations.push(
           `OPA-302: Safety Guardrail Triggered - Writing to production folder '${targetFolder}' is locked. Staging folders (e.g. Validated_Docs/old) must be used.`
+        );
+      } else if (!this.ALLOWED_ROOTS.some(r => rootSeg === r)) {
+        violations.push(
+          `OPA-303: Folder '${targetFolder}' does not exist in SharePoint document library. Permitted folders must be inside 'Validated_Docs' or 'Ski Data 5'.`
         );
       }
     }
