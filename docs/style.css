@@ -79,3 +79,24 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #334155;
 }
+
+/* Calendar Datepicker Native Icon - Bright White & Larger */
+input[type="date"] {
+  color-scheme: dark;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  filter: invert(1) brightness(2.5);
+  width: 24px;
+  height: 24px;
+  padding: 2px;
+  margin-right: 4px;
+  border-radius: 6px;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), filter 0.2s ease;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator:hover {
+  transform: scale(1.3);
+  filter: invert(1) brightness(4);
+}
