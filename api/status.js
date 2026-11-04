@@ -57,6 +57,8 @@ module.exports = async function handler(req, res) {
       id: run.id,
       run_number: run.run_number,
       html_url: run.html_url,
+      created_at: run.created_at,
+      updated_at: run.updated_at,
       status: isRunning ? "running" : (run.conclusion === "success" ? "completed" : "failed"),
       progress_percent: 10,
       active_node: "skidata_auth",

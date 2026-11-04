@@ -116,6 +116,14 @@ function evaluateOPA(payload) {
   const today = new Date();
   today.setHours(23, 59, 59, 999);
 
+  // File organization structure validation
+  if (payload.merge_option) {
+    const validMerge = ["separate", "monthly", "merged"];
+    if (!validMerge.includes(payload.merge_option)) {
+      violations.push(`OPA-601: Invalid merge_option '${payload.merge_option}'. Permitted values: ${validMerge.join(", ")}.`);
+    }
+  }
+
   if (payload.mode === "range") {
     const { start_date, end_date } = payload;
     if (!start_date || !end_date) {
@@ -200,6 +208,10 @@ module.exports = async function handler(req, res) {
     target_folder: payload.target_folder || "Validated_Docs/old"
   };
 
+  if (payload.merge_option) {
+    ghInputs.merge_option = payload.merge_option;
+  }
+
   if (payload.mode === "months") {
     const year = (payload.years && payload.years[0]) || 2026;
     ghInputs.month = (payload.months || []).map(m => `${m} ${year}`).join(", ");
@@ -234,8 +246,9 @@ module.exports = async function handler(req, res) {
 
     return res.status(200).json({
       ok: true,
-      message: `Workflow dispatched successfully to branch '${TARGET_BRANCH}'. Target SharePoint: '${ghInputs.target_folder}'.`,
-      inputs: ghInputs
+      message: `Workflow dispatched successfully to branch '${TARGET_BRANCH}'. Target SharePoint: '${ghInputs.target_folder}'. File Structure: '${ghInputs.merge_option || 'default'}'.`,
+      inputs: ghInputs,
+      dispatched_at: new Date().toISOString()
     });
 
   } catch (err) {

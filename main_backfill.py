@@ -267,6 +267,13 @@ def main():
         choices=["all", "parking", "revenue", "access", "events"],
         help="Target sheets or all",
     )
+    parser.add_argument(
+        "--merge",
+        type=str,
+        default=os.getenv("MERGE_OPTION", "separate"),
+        choices=["separate", "monthly", "merged"],
+        help="File structure: 'separate' (daywise), 'monthly' (aggregate per month), 'merged' (single consolidated file)",
+    )
     parser.add_argument("--headless", action="store_true", default=False, help="Run browser in headless mode")
     parser.add_argument("--no-upload", action="store_true", default=False, help="Skip SharePoint upload")
     args = parser.parse_args()

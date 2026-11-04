@@ -1,30 +1,21 @@
 /**
- * SKIDATA Data Operations Portal - Frontend Application Controller (GitHub Edition)
- * Targets branch: feature/historic_fill
- * Connects directly to GitHub Actions API for execution, live diagram animations, and progress tracking.
+ * SKIDATA Data Operations Portal - Frontend Application Controller (Vercel Edition)
+ * Built for Seniors & Management: Zero tokens or code needed.
  */
-
-const REPO_OWNER = "MAKAN-Comapny";
-const REPO_NAME = "SKIDATA_SCRAPER";
-const TARGET_BRANCH = "feature/historic_fill";
-const WORKFLOW_ID = "skidata-scraper.yml";
 
 const MONTHS = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December"
 ];
 
-const opa = new OPAPolicyEngine();
-
 let authToken = sessionStorage.getItem("skidata_token");
-let ghToken = localStorage.getItem("skidata_gh_token") || "";
 let pollInterval = null;
-let activeRunId = null;
-let activeJobId = null;
 let folderCheckDebounce = null;
 let activeTab = "daily"; // 'daily' or 'hist'
-let lastExecutionFingerprint = null;
-let lastExecutionTime = 0;
+let isDispatching = false;
+let activeJobStatus = "idle";
+let lastDispatchedAt = 0;
+let pendingModalCallback = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   initAuth();
@@ -32,6 +23,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initMonthsGrid();
   initHistModeSwitch();
   initFolderVerification();
+  initFileStructureModal();
   initJobActions();
 });
 
@@ -42,16 +34,6 @@ function initAuth() {
   const form = document.getElementById("loginForm");
   const errDiv = document.getElementById("loginError");
   const logoutBtn = document.getElementById("logoutBtn");
-  const ghTokenInput = document.getElementById("ghTokenInput");
-  const tokenStatusText = document.getElementById("tokenStatusText");
-  const openTokenSettingsBtn = document.getElementById("openTokenSettingsBtn");
-
-  if (ghToken) {
-    ghTokenInput.value = ghToken;
-    tokenStatusText.textContent = "GH Token Active";
-  } else {
-    tokenStatusText.textContent = "Set GH Token";
-  }
 
   if (authToken) {
     modal.classList.add("hidden");
@@ -62,30 +44,35 @@ function initAuth() {
     appContainer.classList.add("hidden");
   }
 
-  form.addEventListener("submit", (e) => {
+  form.addEventListener("submit", async (e) => {
     e.preventDefault();
     errDiv.classList.add("hidden");
     const username = document.getElementById("usernameInput").value.trim();
     const password = document.getElementById("passwordInput").value.trim();
-    const enteredGhToken = ghTokenInput.value.trim();
 
-    if (username === "admin" && password === "Makan@2026!") {
-      authToken = "skidata_session_valid";
-      sessionStorage.setItem("skidata_token", authToken);
+    try {
+      const res = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password })
+      });
 
-      if (enteredGhToken) {
-        ghToken = enteredGhToken;
-        localStorage.setItem("skidata_gh_token", ghToken);
-        tokenStatusText.textContent = "GH Token Active";
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || "Invalid username or password.");
       }
+
+      const data = await res.json();
+      authToken = data.token;
+      sessionStorage.setItem("skidata_token", authToken);
 
       modal.classList.add("hidden");
       appContainer.classList.remove("hidden");
       startStatusPolling();
       verifyDailyFolder();
       verifyHistFolder();
-    } else {
-      errDiv.textContent = "Invalid username or password. Universal access: admin / Makan@2026!";
+    } catch (err) {
+      errDiv.textContent = err.message;
       errDiv.classList.remove("hidden");
     }
   });
@@ -95,16 +82,6 @@ function initAuth() {
     authToken = null;
     if (pollInterval) clearInterval(pollInterval);
     window.location.reload();
-  });
-
-  openTokenSettingsBtn.addEventListener("click", () => {
-    const newToken = prompt("Enter or update your GitHub Personal Access Token (PAT with 'Actions: Read & write'):", ghToken);
-    if (newToken !== null) {
-      ghToken = newToken.trim();
-      localStorage.setItem("skidata_gh_token", ghToken);
-      tokenStatusText.textContent = ghToken ? "GH Token Active" : "Set GH Token";
-      alert("GitHub Token saved in browser.");
-    }
   });
 }
 
@@ -126,7 +103,7 @@ function initTabs() {
     tabDailyContent.classList.remove("hidden");
     tabHistContent.classList.add("hidden");
 
-    const dailyFolder = opa.normalizeFolder(document.getElementById("dailyFolderInput").value.trim());
+    const dailyFolder = document.getElementById("dailyFolderInput").value.trim();
     if (dailyFolder) {
       diagDestText.textContent = dailyFolder;
       diagDestText.title = dailyFolder;
@@ -143,7 +120,7 @@ function initTabs() {
     tabHistContent.classList.remove("hidden");
     tabDailyContent.classList.add("hidden");
 
-    const histFolder = opa.normalizeFolder(document.getElementById("histFolderInput").value.trim());
+    const histFolder = document.getElementById("histFolderInput").value.trim();
     if (histFolder) {
       diagDestText.textContent = histFolder;
       diagDestText.title = histFolder;
@@ -174,7 +151,7 @@ function initFolderVerification() {
   verifyHistFolder();
 }
 
-function verifyDailyFolder() {
+async function verifyDailyFolder() {
   const input = document.getElementById("dailyFolderInput");
   const statusDiv = document.getElementById("dailyFolderStatus");
   const statusText = document.getElementById("dailyFolderStatusText");
@@ -182,25 +159,46 @@ function verifyDailyFolder() {
   const diagDestText = document.getElementById("diagDestFolderText");
 
   const val = input.value.trim();
-  const evaluation = opa.evaluate({ mode: "daily", target_folder: val, operation: "export" });
+  if (!val) {
+    statusText.textContent = "no accessible: folder path cannot be empty";
+    statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-rose-400";
+    runBtn.disabled = true;
+    return;
+  }
 
-  if (evaluation.allowed) {
-    statusText.innerHTML = `<i class="fa-solid fa-circle-check text-emerald-400"></i> Folder verified & ready (${evaluation.normalized_folder})`;
-    statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-emerald-400";
-    runBtn.disabled = false;
-    if (activeTab === "daily") {
-      diagDestText.textContent = evaluation.normalized_folder;
-      diagDestText.title = evaluation.normalized_folder;
+  try {
+    const res = await fetch("/api/verify-folder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folder_input: val })
+    });
+    const data = await res.json();
+
+    if (data.accessible) {
+      input.dataset.cleanPath = data.path;
+      statusText.innerHTML = `<i class="fa-solid fa-circle-check text-emerald-400"></i> SharePoint folder verified: <strong>${data.path}</strong>`;
+      statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-emerald-400";
+      if (!isWorkflowBusy()) {
+        runBtn.disabled = false;
+      }
+      diagDestText.textContent = data.path;
+      diagDestText.title = data.path;
+    } else {
+      // User requirement: "if not write a message below 'no accessible'"
+      const err = data.error || 'Access Denied';
+      const msg = err.startsWith('no accessible') ? err : `no accessible: ${err}`;
+      statusText.innerHTML = `<i class="fa-solid fa-circle-xmark text-rose-400"></i> ${msg}`;
+      statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-rose-400";
+      runBtn.disabled = true;
     }
-  } else {
-    // User requirement: "if not write a message below 'no accessible'"
-    statusText.innerHTML = `<i class="fa-solid fa-circle-xmark text-rose-400"></i> no accessible: ${evaluation.violations[0] || 'Access Denied'}`;
+  } catch (err) {
+    statusText.innerHTML = `<i class="fa-solid fa-circle-xmark text-rose-400"></i> no accessible`;
     statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-rose-400";
     runBtn.disabled = true;
   }
 }
 
-function verifyHistFolder() {
+async function verifyHistFolder() {
   const input = document.getElementById("histFolderInput");
   const statusDiv = document.getElementById("histFolderStatus");
   const statusText = document.getElementById("histFolderStatusText");
@@ -208,22 +206,40 @@ function verifyHistFolder() {
   const diagDestText = document.getElementById("diagDestFolderText");
 
   const val = input.value.trim();
-  const evaluation = opa.evaluate({ mode: "range", start_date: "2026-01-01", end_date: "2026-01-02", target_folder: val, operation: "export" });
+  if (!val) {
+    statusText.textContent = "no accessible: folder path cannot be empty";
+    statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-rose-400";
+    runBtn.disabled = true;
+    return;
+  }
 
-  const folderViolations = evaluation.violations.filter(v => v.includes("OPA-301") || v.includes("OPA-302") || v.includes("OPA-303"));
-  if (folderViolations.length === 0 && val.length > 0) {
-    const norm = opa.normalizeFolder(val);
-    statusText.innerHTML = `<i class="fa-solid fa-circle-check text-emerald-400"></i> Target archive folder ready (${norm})`;
-    statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-emerald-400";
-    runBtn.disabled = false;
-    if (activeTab === "hist") {
-      diagDestText.textContent = norm;
-      diagDestText.title = norm;
+  try {
+    const res = await fetch("/api/verify-folder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folder_input: val })
+    });
+    const data = await res.json();
+
+    if (data.accessible) {
+      input.dataset.cleanPath = data.path;
+      statusText.innerHTML = `<i class="fa-solid fa-circle-check text-emerald-400"></i> SharePoint folder verified: <strong>${data.path}</strong>`;
+      statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-emerald-400";
+      if (!isWorkflowBusy()) {
+        runBtn.disabled = false;
+      }
+      diagDestText.textContent = data.path;
+      diagDestText.title = data.path;
+    } else {
+      // User requirement: "if not write a message below 'no accessible'"
+      const err = data.error || 'Access Denied';
+      const msg = err.startsWith('no accessible') ? err : `no accessible: ${err}`;
+      statusText.innerHTML = `<i class="fa-solid fa-circle-xmark text-rose-400"></i> ${msg}`;
+      statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-rose-400";
+      runBtn.disabled = true;
     }
-  } else {
-    // User requirement: "if not write a message below 'no accessible'"
-    const errMsg = folderViolations[0] || 'no accessible: Invalid destination folder';
-    statusText.innerHTML = `<i class="fa-solid fa-circle-xmark text-rose-400"></i> no accessible: ${errMsg}`;
+  } catch (err) {
+    statusText.innerHTML = `<i class="fa-solid fa-circle-xmark text-rose-400"></i> no accessible`;
     statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-rose-400";
     runBtn.disabled = true;
   }
@@ -268,47 +284,342 @@ function initHistModeSwitch() {
       secSingle.classList.toggle("hidden", mode !== "single_date");
     });
   });
+
+  // 1-Click calendar picker popup
+  ['rangeStartDate', 'rangeEndDate', 'singleHistoricDate'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener("click", () => {
+        if (typeof el.showPicker === "function") {
+          try { el.showPicker(); } catch (err) {}
+        }
+      });
+    }
+  });
 }
 
-// ================= 5. JOB EXECUTION (GITHUB ACTIONS API) =================
+// ================= 5. FILE STRUCTURE MODAL & HELPERS =================
+function isWorkflowBusy() {
+  return isDispatching || activeJobStatus === "running" || activeJobStatus === "queued";
+}
+
+function setWorkflowButtonsBusy(mode = "daily", label = "Initializing Run...") {
+  const runDailyBtn = document.getElementById("runDailyBtn");
+  const runHistBtn = document.getElementById("runHistBtn");
+
+  if (runDailyBtn) {
+    runDailyBtn.disabled = true;
+    runDailyBtn.classList.add("cursor-not-allowed");
+    if (mode === "daily") {
+      runDailyBtn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin text-xs mr-2"></i><span>${label}</span>`;
+      runDailyBtn.classList.remove("opacity-50");
+      runDailyBtn.classList.add("opacity-75");
+    } else {
+      runDailyBtn.innerHTML = `<i class="fa-solid fa-lock text-xs mr-2 opacity-60"></i><span>Pipeline Locked</span>`;
+      runDailyBtn.classList.add("opacity-50");
+    }
+  }
+
+  if (runHistBtn) {
+    runHistBtn.disabled = true;
+    runHistBtn.classList.add("cursor-not-allowed");
+    if (mode === "historical" || mode === "hist") {
+      runHistBtn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin text-xs mr-2"></i><span>${label}</span>`;
+      runHistBtn.classList.remove("opacity-50");
+      runHistBtn.classList.add("opacity-75");
+    } else {
+      runHistBtn.innerHTML = `<i class="fa-solid fa-lock text-xs mr-2 opacity-60"></i><span>Pipeline Locked</span>`;
+      runHistBtn.classList.add("opacity-50");
+    }
+  }
+}
+
+function restoreWorkflowButtons() {
+  if (isWorkflowBusy()) return;
+
+  const runDailyBtn = document.getElementById("runDailyBtn");
+  const runHistBtn = document.getElementById("runHistBtn");
+  const dailyInput = document.getElementById("dailyFolderInput");
+  const histInput = document.getElementById("histFolderInput");
+
+  if (runDailyBtn) {
+    runDailyBtn.innerHTML = `<i class="fa-solid fa-play text-xs mr-2"></i><span>Run Daily Ingestion Workflow</span>`;
+    runDailyBtn.classList.remove("opacity-75", "opacity-60", "opacity-50", "cursor-not-allowed");
+    runDailyBtn.disabled = !Boolean(dailyInput && dailyInput.dataset.cleanPath);
+  }
+
+  if (runHistBtn) {
+    runHistBtn.innerHTML = `<i class="fa-solid fa-forward text-xs mr-2"></i><span>Start Historical Extraction</span>`;
+    runHistBtn.classList.remove("opacity-75", "opacity-60", "opacity-50", "cursor-not-allowed");
+    runHistBtn.disabled = !Boolean(histInput && histInput.dataset.cleanPath);
+  }
+}
+
+function getDaysDifference(startStr, endStr) {
+  if (!startStr || !endStr) return 0;
+  const [y1, m1, d1] = startStr.split("-").map(Number);
+  const [y2, m2, d2] = endStr.split("-").map(Number);
+  const dt1 = new Date(y1, m1 - 1, d1);
+  const dt2 = new Date(y2, m2 - 1, d2);
+  const diffTime = dt2.getTime() - dt1.getTime();
+  return Math.max(1, Math.round(diffTime / (1000 * 60 * 60 * 24)) + 1);
+}
+
+function initFileStructureModal() {
+  const modal = document.getElementById("fileStructureModal");
+  const closeBtn = document.getElementById("closeFileStructureModalBtn");
+  const cancelBtn = document.getElementById("cancelFileStructureBtn");
+  const confirmBtn = document.getElementById("confirmFileStructureBtn");
+
+  if (!modal) return;
+
+  function closeModal() {
+    modal.classList.add("hidden");
+    pendingModalCallback = null;
+  }
+
+  if (closeBtn) closeBtn.addEventListener("click", closeModal);
+  if (cancelBtn) cancelBtn.addEventListener("click", closeModal);
+
+  // Close on backdrop click
+  modal.addEventListener("click", (e) => {
+    if (e.target === modal) closeModal();
+  });
+
+  // Close on Escape key
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !modal.classList.contains("hidden")) {
+      closeModal();
+    }
+  });
+
+  if (confirmBtn) {
+    confirmBtn.addEventListener("click", () => {
+      const selected = document.querySelector('input[name="fileStructureChoice"]:checked');
+      const choice = selected ? selected.value : "separate";
+      const cb = pendingModalCallback;
+      closeModal();
+      if (typeof cb === "function") {
+        cb(choice);
+      }
+    });
+  }
+}
+
+function promptFileStructureModal(config, onConfirm) {
+  const modal = document.getElementById("fileStructureModal");
+  const titleEl = document.getElementById("fileStructureModalTitle");
+  const subtitleEl = document.getElementById("fileStructureModalSubtitle");
+  const optionsContainer = document.getElementById("fileStructureOptions");
+
+  if (!modal || !optionsContainer) {
+    onConfirm(config.defaultChoice || "separate");
+    return;
+  }
+
+  pendingModalCallback = onConfirm;
+
+  titleEl.textContent = config.title || "Select File Structure";
+  subtitleEl.textContent = config.subtitle || "Choose how extracted tables will be organized in SharePoint";
+
+  let options = [];
+  if (config.type === "multiday") {
+    options = [
+      {
+        value: "separate",
+        title: "Day-wise Separate Files",
+        badge: "Recommended",
+        icon: '<i class="fa-solid fa-calendar-day text-brand-400"></i>',
+        desc: "Maintains distinct individual daily files for each date. Best for daily archival and incremental processing."
+      },
+      {
+        value: "merged",
+        title: "Single Consolidated Merge",
+        badge: "Consolidated",
+        icon: '<i class="fa-solid fa-file-excel text-sky-400"></i>',
+        desc: "Combines all extracted dates into 1 consolidated master file per table. Best for single-table bulk analysis."
+      }
+    ];
+  } else {
+    // multimonth
+    options = [
+      {
+        value: "separate",
+        title: "All Days Separate (Day-wise)",
+        badge: "Granular",
+        icon: '<i class="fa-solid fa-calendar-days text-brand-400"></i>',
+        desc: "Generates separate individual daily Excel files for each day across all selected months."
+      },
+      {
+        value: "monthly",
+        title: "Monthly Aggregated (1 File per Month)",
+        badge: "Recommended",
+        icon: '<i class="fa-solid fa-calendar text-emerald-400"></i>',
+        desc: "Aggregates records into one consolidated file per month (e.g. August file, September file)."
+      },
+      {
+        value: "merged",
+        title: "Complete Master Merge",
+        badge: "Single Master",
+        icon: '<i class="fa-solid fa-layer-group text-sky-400"></i>',
+        desc: "Consolidates all months and all days into a single comprehensive master workbook per table."
+      }
+    ];
+  }
+
+  const defaultVal = config.defaultChoice || (config.type === "multiday" ? "separate" : "monthly");
+
+  optionsContainer.innerHTML = options.map((opt, i) => {
+    const isChecked = (opt.value === defaultVal) || (i === 0 && !defaultVal);
+    return `
+      <label class="structure-card cursor-pointer p-4 rounded-xl border border-slate-700/80 bg-slate-800/60 hover:bg-slate-800 hover:border-brand-500/60 transition flex items-start gap-3.5 select-none">
+        <input type="radio" name="fileStructureChoice" value="${opt.value}" ${isChecked ? 'checked' : ''} class="mt-1 text-brand-500 focus:ring-brand-500">
+        <div class="flex-1">
+          <div class="flex items-center gap-2">
+            <div class="w-6 h-6 rounded-lg bg-slate-700/60 flex items-center justify-center text-xs">
+              ${opt.icon}
+            </div>
+            <span class="text-xs font-bold text-white">${opt.title}</span>
+            ${opt.badge ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-semibold ${opt.badge === 'Recommended' ? 'bg-brand-500/20 text-brand-300 border border-brand-500/30' : 'bg-slate-700 text-slate-300'}">${opt.badge}</span>` : ''}
+          </div>
+          <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed">${opt.desc}</p>
+        </div>
+      </label>
+    `;
+  }).join("");
+
+  modal.classList.remove("hidden");
+}
+
+// ================= 6. JOB EXECUTION =================
 function initJobActions() {
   const runDailyBtn = document.getElementById("runDailyBtn");
   const runHistBtn = document.getElementById("runHistBtn");
   const clearLogsBtn = document.getElementById("clearLogsBtn");
 
-  runDailyBtn.addEventListener("click", async () => {
-    const targetFolder = opa.normalizeFolder(document.getElementById("dailyFolderInput").value.trim());
-    await triggerGitHubWorkflow({
-      mode: "daily",
-      target_folder: targetFolder
+  runDailyBtn.addEventListener("click", () => {
+    if (isWorkflowBusy()) return;
+    const dailyInput = document.getElementById("dailyFolderInput");
+    const targetFolder = dailyInput.dataset.cleanPath || dailyInput.value.trim();
+
+    // Daily workflow extracts rolling 5 days (> 1 day, <= 31 days)
+    promptFileStructureModal({
+      type: "multiday",
+      title: "Daily Rolling Ingestion (5 Days)",
+      subtitle: "The daily workflow captures 5 rolling days. Choose your output organization in SharePoint:",
+      defaultChoice: "separate"
+    }, async (mergeChoice) => {
+      await triggerExecution({
+        mode: "daily",
+        target_folder: targetFolder,
+        merge_option: mergeChoice
+      });
     });
   });
 
-  runHistBtn.addEventListener("click", async () => {
+  runHistBtn.addEventListener("click", () => {
+    if (isWorkflowBusy()) return;
     const mode = document.querySelector('input[name="histMode"]:checked').value;
-    const targetFolder = opa.normalizeFolder(document.getElementById("histFolderInput").value.trim());
+    const histInput = document.getElementById("histFolderInput");
+    const targetFolder = histInput.dataset.cleanPath || histInput.value.trim();
     const payload = { mode, target_folder: targetFolder, operation: "export" };
+
+    if (mode === "single_date") {
+      const single = document.getElementById("singleHistoricDate").value;
+      if (!single) {
+        alert("Please select a historic date.");
+        return;
+      }
+      payload.target_date = single;
+      // Exactly 1 day: bypass modal and run directly
+      payload.merge_option = "separate";
+      triggerExecution(payload);
+      return;
+    }
+
+    if (mode === "range") {
+      const start = document.getElementById("rangeStartDate").value;
+      const end = document.getElementById("rangeEndDate").value;
+      if (!start || !end) {
+        alert("Please select both starting date and ending date.");
+        return;
+      }
+      if (start > end) {
+        alert("Starting date cannot be after ending date.");
+        return;
+      }
+      payload.start_date = start;
+      payload.end_date = end;
+
+      const diffDays = getDaysDifference(start, end);
+      if (diffDays <= 1) {
+        // Exactly 1 day: bypass modal and run directly
+        payload.merge_option = "separate";
+        triggerExecution(payload);
+        return;
+      }
+
+      if (diffDays <= 31) {
+        // 2 to 31 days: multi-day prompt (separate vs merged)
+        promptFileStructureModal({
+          type: "multiday",
+          title: `Date Range Ingestion (${diffDays} Days)`,
+          subtitle: `Extraction spans from ${start} to ${end} (${diffDays} days). Choose file structure:`,
+          defaultChoice: "separate"
+        }, (mergeChoice) => {
+          payload.merge_option = mergeChoice;
+          triggerExecution(payload);
+        });
+      } else {
+        // > 31 days: multi-month prompt (separate vs monthly vs master merged)
+        promptFileStructureModal({
+          type: "multimonth",
+          title: `Multi-Month Date Range (${diffDays} Days)`,
+          subtitle: `Extraction spans multiple months (${start} to ${end}). Choose how files should be aggregated:`,
+          defaultChoice: "monthly"
+        }, (mergeChoice) => {
+          payload.merge_option = mergeChoice;
+          triggerExecution(payload);
+        });
+      }
+      return;
+    }
 
     if (mode === "months") {
       const years = Array.from(document.querySelectorAll('input[name="histYear"]:checked')).map(cb => parseInt(cb.value));
       const months = Array.from(document.querySelectorAll('input[name="histMonth"]:checked')).map(cb => cb.value);
+      if (years.length === 0 || months.length === 0) {
+        alert("Please select at least one year and one month.");
+        return;
+      }
       payload.years = years;
       payload.months = months;
-    } else if (mode === "range") {
-      payload.start_date = document.getElementById("rangeStartDate").value;
-      payload.end_date = document.getElementById("rangeEndDate").value;
-    } else if (mode === "single_date") {
-      payload.target_date = document.getElementById("singleHistoricDate").value;
-    }
 
-    // Step 1: Open Policy Agent Evaluation
-    const evaluation = opa.evaluate(payload);
-    if (!evaluation.allowed) {
-      alert("OPA Security Policy Violation:\n\n" + evaluation.violations.join("\n"));
+      if (months.length === 1) {
+        // Single month (<= 31 days)
+        promptFileStructureModal({
+          type: "multiday",
+          title: `Historical Ingestion (${months[0]} ${years.join(", ")})`,
+          subtitle: `Selected 1 full month (${months[0]}). Choose how tables should be organized:`,
+          defaultChoice: "separate"
+        }, (mergeChoice) => {
+          payload.merge_option = mergeChoice;
+          triggerExecution(payload);
+        });
+      } else {
+        // Multiple months (> 1 month)
+        promptFileStructureModal({
+          type: "multimonth",
+          title: `Multi-Month Historical Ingestion (${months.length} Months)`,
+          subtitle: `Selected ${months.length} months (${months.join(", ")}). Choose aggregation structure:`,
+          defaultChoice: "monthly"
+        }, (mergeChoice) => {
+          payload.merge_option = mergeChoice;
+          triggerExecution(payload);
+        });
+      }
       return;
     }
-
-    await triggerGitHubWorkflow(payload);
   });
 
   clearLogsBtn.addEventListener("click", () => {
@@ -316,241 +627,213 @@ function initJobActions() {
   });
 }
 
-async function triggerGitHubWorkflow(payload) {
-  if (!ghToken) {
-    const token = prompt("Enter your GitHub Personal Access Token to trigger this workflow:\n(Permission needed: Actions Read & Write)");
-    if (!token) return;
-    ghToken = token.trim();
-    localStorage.setItem("skidata_gh_token", ghToken);
-    document.getElementById("tokenStatusText").textContent = "GH Token Active";
-  }
+async function triggerExecution(payload) {
+  if (isWorkflowBusy()) return;
 
-  // Idempotency Check (SHA-256 fingerprint)
-  const fp = JSON.stringify(payload);
-  const now = Date.now();
-  if (lastExecutionFingerprint === fp && (now - lastExecutionTime) < 900000) {
-    const proceed = confirm("Notice: An identical extraction request was dispatched less than 15 minutes ago.\n\nDo you still want to re-run it?");
-    if (!proceed) return;
-  }
-  lastExecutionFingerprint = fp;
-  lastExecutionTime = now;
-
-  // Clear previous result banner & reset nodes
+  // Clear previous result banner
   const banner = document.getElementById("executionResultBanner");
   banner.className = "hidden p-4 rounded-xl border text-xs";
   banner.innerHTML = "";
 
-  appendConsoleLog(`[System] Initializing dispatch to GitHub Actions (Branch: ${TARGET_BRANCH})...`);
+  isDispatching = true;
+  lastDispatchedAt = Date.now();
+  setWorkflowButtonsBusy(payload.mode === "daily" ? "daily" : "historical", "Launching Job...");
 
-  // Build GitHub Actions Inputs
-  const ghInputs = {
-    mode: payload.mode === "daily" ? "daily" : "historical",
-    target_folder: payload.target_folder || "Validated_Docs/old"
-  };
-
-  if (payload.mode === "months") {
-    const year = payload.years[0] || 2026;
-    ghInputs.month = payload.months.map(m => `${m} ${year}`).join(", ");
-  } else if (payload.mode === "range") {
-    ghInputs.date_range = `${payload.start_date} to ${payload.end_date}`;
-  } else if (payload.mode === "single_date") {
-    ghInputs.date_range = `${payload.target_date} to ${payload.target_date}`;
-  }
-
-  try {
-    const dispatchUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/workflows/${WORKFLOW_ID}/dispatches`;
-    const res = await fetch(dispatchUrl, {
-      method: "POST",
-      headers: {
-        "Accept": "application/vnd.github+json",
-        "Authorization": `Bearer ${ghToken}`,
-        "X-GitHub-Api-Version": "2022-11-28"
-      },
-      body: JSON.stringify({
-        ref: TARGET_BRANCH,
-        inputs: ghInputs
-      })
-    });
-
-    if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
-        alert("GitHub Authentication Error: Invalid token or missing 'Actions: Read and write' permission.");
-      } else {
-        const errData = await res.json().catch(() => ({}));
-        alert(`GitHub API Error (${res.status}): ${errData.message || res.statusText}`);
-      }
-      appendConsoleLog(`[Error] GitHub dispatch rejected with HTTP ${res.status}.`);
-      return;
-    }
-
-    appendConsoleLog(`[System] Workflow dispatched successfully on branch '${TARGET_BRANCH}'. Waiting for cloud runner...`);
-
-    // Reflect destination folder on diagram
-    const diagDestText = document.getElementById("diagDestFolderText");
-    diagDestText.textContent = payload.target_folder;
-    diagDestText.title = payload.target_folder;
-
-    // Wait 3 seconds and start polling for the run ID
-    setTimeout(pollActiveWorkflowRun, 3000);
-
-  } catch (err) {
-    alert("Network request error connecting to GitHub: " + err.message);
-    appendConsoleLog(`[Network Error] ${err.message}`);
-  }
-}
-
-// ================= 6. LIVE STATUS, DIAGRAM ANIMATION & RESULTS =================
-function startStatusPolling() {
-  if (pollInterval) clearInterval(pollInterval);
-  pollInterval = setInterval(pollActiveWorkflowRun, 3000);
-  pollActiveWorkflowRun();
-}
-
-async function pollActiveWorkflowRun() {
-  if (!ghToken) return;
-
-  try {
-    // 1. Fetch runs for branch feature/historic_fill
-    const runsUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/workflows/${WORKFLOW_ID}/runs?branch=${TARGET_BRANCH}&per_page=3`;
-    const res = await fetch(runsUrl, {
-      headers: {
-        "Accept": "application/vnd.github+json",
-        "Authorization": `Bearer ${ghToken}`,
-        "X-GitHub-Api-Version": "2022-11-28"
-      }
-    });
-
-    if (!res.ok) return;
-    const data = await res.json();
-    if (!data.workflow_runs || data.workflow_runs.length === 0) return;
-
-    const latestRun = data.workflow_runs[0];
-    renderGitHubRunState(latestRun);
-
-  } catch (err) {
-    console.warn("Polling error:", err);
-  }
-}
-
-async function renderGitHubRunState(run) {
   const queueBadge = document.getElementById("queueBadge");
   const durationBadge = document.getElementById("jobDurationBadge");
   const progressBar = document.getElementById("jobProgressBar");
   const livePulse = document.getElementById("livePulseIndicator");
 
-  const isRunning = (run.status === "in_progress" || run.status === "queued");
+  queueBadge.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin text-amber-400 mr-1.5"></i> DISPATCHING...`;
+  durationBadge.innerHTML = `<span class="text-amber-400 font-semibold"><i class="fa-solid fa-cloud-arrow-up animate-pulse mr-1"></i> Creating Workflow Run...</span>`;
+  progressBar.style.width = "10%";
+  progressBar.className = "h-full bg-amber-500 rounded-full transition-all duration-500 animate-pulse";
+  livePulse.classList.remove("hidden");
+  livePulse.classList.add("inline-flex");
 
-  if (isRunning) {
-    queueBadge.textContent = `Queue: RUNNING (Run #${run.run_number})`;
-    durationBadge.textContent = `GitHub Run #${run.run_number} (${run.status.toUpperCase()})`;
-    livePulse.classList.remove("hidden");
-    livePulse.classList.add("inline-flex");
+  appendConsoleLog(`[System] Initializing ${payload.mode} extraction request (File Structure: ${payload.merge_option || 'default'})...`);
 
-    // Fetch live job step details
-    await pollJobSteps(run.id);
-  } else {
+  try {
+    const res = await fetch("/api/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      isDispatching = false;
+      restoreWorkflowButtons();
+      queueBadge.textContent = "Queue: Idle";
+      durationBadge.textContent = "Status: Idle";
+      progressBar.style.width = "0%";
+      livePulse.classList.add("hidden");
+      livePulse.classList.remove("inline-flex");
+
+      if (res.status === 403 && data.detail && data.detail.violations) {
+        alert("OPA Security Denial:\n\n" + data.detail.violations.join("\n"));
+      } else {
+        alert("Execution Error: " + (data.detail || "Workflow could not be launched."));
+      }
+      appendConsoleLog(`[Error] Request failed: ${data.detail || res.statusText}`);
+      return;
+    }
+
+    // Reflect destination folder on diagram
+    const diagDestText = document.getElementById("diagDestFolderText");
+    diagDestText.textContent = payload.target_folder || "Validated_Docs/old";
+    diagDestText.title = payload.target_folder || "Validated_Docs/old";
+
+    appendConsoleLog(`[System] ${data.message || "Extraction started successfully."}`);
+    setWorkflowButtonsBusy(payload.mode === "daily" ? "daily" : "historical", "Queued in Runner...");
+    queueBadge.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin text-amber-400 mr-1.5"></i> QUEUED IN RUNNER`;
+    durationBadge.innerHTML = `<span class="text-amber-400 font-semibold"><i class="fa-solid fa-hourglass-start animate-spin mr-1"></i> Waiting for Runner...</span>`;
+
+    // Fast status polls to catch the new run as soon as GitHub creates it
+    setTimeout(pollJobStatus, 1200);
+    setTimeout(pollJobStatus, 3000);
+    setTimeout(pollJobStatus, 6000);
+  } catch (err) {
+    isDispatching = false;
+    restoreWorkflowButtons();
     queueBadge.textContent = "Queue: Idle";
-    durationBadge.textContent = `Run #${run.run_number} (${(run.conclusion || run.status).toUpperCase()})`;
+    durationBadge.textContent = "Status: Idle";
+    progressBar.style.width = "0%";
     livePulse.classList.add("hidden");
     livePulse.classList.remove("inline-flex");
 
-    if (run.conclusion === "success") {
-      progressBar.style.width = "100%";
-      renderSuccessfulCompletion(run);
-    } else if (run.conclusion === "failure") {
-      renderFailure(run);
-    }
+    alert("Network request error: " + err.message);
+    appendConsoleLog(`[Network Error] ${err.message}`);
   }
 }
 
-async function pollJobSteps(runId) {
+// ================= 7. LIVE STATUS, DIAGRAM ANIMATION & RESULTS =================
+function startStatusPolling() {
+  if (pollInterval) clearInterval(pollInterval);
+  pollJobStatus();
+  pollInterval = setInterval(pollJobStatus, 2500);
+}
+
+async function pollJobStatus() {
+  if (!authToken) return;
+
   try {
-    const jobsUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${runId}/jobs`;
-    const res = await fetch(jobsUrl, {
-      headers: {
-        "Accept": "application/vnd.github+json",
-        "Authorization": `Bearer ${ghToken}`,
-        "X-GitHub-Api-Version": "2022-11-28"
-      }
-    });
-
+    const res = await fetch("/api/status");
     if (!res.ok) return;
-    const data = await res.json();
-    if (!data.jobs || data.jobs.length === 0) return;
 
-    const job = data.jobs[0];
-    const steps = job.steps || [];
-    const activeStep = steps.find(s => s.status === "in_progress") || steps[steps.length - 1];
-
-    if (activeStep) {
-      updateDiagramFromGitHubStep(activeStep.name, activeStep.status);
-    }
-  } catch (e) {
-    console.warn("Steps poll error:", e);
+    const job = await res.json();
+    renderJobState(job);
+  } catch (err) {
+    console.warn("Polling error:", err);
   }
 }
 
-function updateDiagramFromGitHubStep(stepName, stepStatus) {
-  const nodeSkidata = document.getElementById("node_skidata");
-  const nodeScraper = document.getElementById("node_scraper");
-  const nodeTables = document.getElementById("node_tables");
-  const nodeDest = document.getElementById("node_destination");
-  const arr1 = document.getElementById("arrow_1");
-  const arr2 = document.getElementById("arrow_2");
-  const arr3 = document.getElementById("arrow_3");
+function renderJobState(job) {
+  const queueBadge = document.getElementById("queueBadge");
+  const durationBadge = document.getElementById("jobDurationBadge");
   const progressBar = document.getElementById("jobProgressBar");
+  const livePulse = document.getElementById("livePulseIndicator");
 
-  const name = stepName.toLowerCase();
-
-  const setNode = (el, pillText, state) => {
-    el.className = `diagram-node flex-1 p-4 rounded-xl state-${state} text-center shadow-md`;
-    el.querySelector(".node-pill").textContent = pillText;
-  };
-
-  if (name.includes("checkout") || name.includes("setup python")) {
-    setNode(nodeSkidata, "Authenticating...", "running");
-    arr1.className = "diagram-arrow arrow-active text-xl px-1";
-    progressBar.style.width = "20%";
-    appendConsoleLog(`[Step] Setting up cloud environment and authenticating SkiData...`);
-  } else if (name.includes("playwright") || name.includes("dependencies")) {
-    setNode(nodeSkidata, "Connected", "completed");
-    setNode(nodeScraper, "Browser Setup", "running");
-    arr1.className = "diagram-arrow arrow-done text-xl px-1";
-    arr2.className = "diagram-arrow arrow-active text-xl px-1";
-    progressBar.style.width = "40%";
-    appendConsoleLog(`[Step] Initializing Playwright browser automation engine...`);
-  } else if (name.includes("pipeline") || name.includes("historical") || name.includes("daily")) {
-    setNode(nodeSkidata, "Connected", "completed");
-    setNode(nodeScraper, "Scraping Active", "completed");
-    setNode(nodeTables, "Ingesting Tables", "running");
-    arr1.className = "diagram-arrow arrow-done text-xl px-1";
-    arr2.className = "diagram-arrow arrow-done text-xl px-1";
-    arr3.className = "diagram-arrow arrow-active text-xl px-1";
-    progressBar.style.width = "75%";
-
-    // Set table badges to in-progress
-    updateTableBadgesLive("downloading");
-    appendConsoleLog(`[Step] Downloading & cleaning 4 core tables from SkiData analytics hub...`);
+  // In-flight dispatch protection:
+  // If we just dispatched, and GitHub API still returns idle or an old completed run,
+  // do NOT unblock buttons or set queue to idle! The runner is still spinning up!
+  if (isDispatching) {
+    const isNewActiveRun = job && (job.status === "running" || job.status === "queued");
+    if (isNewActiveRun) {
+      isDispatching = false;
+    } else if (Date.now() - lastDispatchedAt < 40000) {
+      // Runner is still queuing on GitHub
+      return;
+    } else {
+      // Safety timeout: 40s passed, unlock
+      isDispatching = false;
+    }
   }
+
+  activeJobStatus = (job && job.status) ? job.status : "idle";
+
+  if (!job || job.status === "idle") {
+    queueBadge.textContent = "Queue: Idle";
+    durationBadge.textContent = "Status: Idle";
+    progressBar.style.width = "0%";
+    livePulse.classList.add("hidden");
+    livePulse.classList.remove("inline-flex");
+    resetDiagramNodes();
+    restoreWorkflowButtons();
+    return;
+  }
+
+  const isRunning = (job.status === "running" || job.status === "queued");
+  queueBadge.textContent = `Queue: ${job.status.toUpperCase()}`;
+  
+  if (job.status === "completed") {
+    durationBadge.innerHTML = `<i class="fa-solid fa-circle-check text-emerald-400 mr-1"></i> Run #${job.run_number || job.id || 1} Completed &bull; 100%`;
+    progressBar.style.width = "100%";
+    progressBar.className = "h-full bg-emerald-500 rounded-full transition-all duration-500";
+    livePulse.classList.add("hidden");
+    livePulse.classList.remove("inline-flex");
+    restoreWorkflowButtons();
+  } else if (job.status === "failed") {
+    durationBadge.innerHTML = `<i class="fa-solid fa-circle-xmark text-rose-400 mr-1"></i> Run #${job.run_number || job.id || 1} Failed`;
+    progressBar.style.width = "100%";
+    progressBar.className = "h-full bg-rose-500 rounded-full transition-all duration-500";
+    livePulse.classList.add("hidden");
+    livePulse.classList.remove("inline-flex");
+    restoreWorkflowButtons();
+  } else {
+    durationBadge.textContent = `Run #${job.run_number || job.id || 1} (${job.status.toUpperCase()}) • ${job.progress_percent || 0}%`;
+    progressBar.style.width = `${job.progress_percent || 0}%`;
+    progressBar.className = "h-full bg-brand-500 rounded-full transition-all duration-500 animate-pulse";
+    livePulse.classList.remove("hidden");
+    livePulse.classList.add("inline-flex");
+    setWorkflowButtonsBusy(activeTab, `Run #${job.run_number || ''} In Progress...`);
+  }
+
+  // Update Diagram Nodes and Animated Arrows
+  updateDiagramColors(job);
+
+  // Update 4 Core Table Status Badges
+  updateTableBadges(job.tables_status);
+
+  // Update Logs Console
+  if (job.logs && job.logs.length > 0) {
+    job.logs.forEach(l => appendConsoleLog(l));
+  }
+
+  // Update Final Result Banner
+  renderResultBanner(job);
 }
 
-function updateTableBadgesLive(state) {
-  const ids = ["tblBadge_revenue", "tblBadge_access", "tblBadge_system", "tblBadge_parking"];
-  ids.forEach(id => {
+function updateTableBadges(tablesStatus) {
+  if (!tablesStatus) return;
+
+  const mapping = [
+    { key: "Revenue in Depth", id: "tblBadge_revenue" },
+    { key: "Access in Depth", id: "tblBadge_access" },
+    { key: "System Event in Depth", id: "tblBadge_system" },
+    { key: "Parking Transactions", id: "tblBadge_parking" },
+  ];
+
+  mapping.forEach(({ key, id }) => {
     const el = document.getElementById(id);
     if (!el) return;
     const chip = el.querySelector(".status-chip");
-    if (state === "downloading") {
-      chip.textContent = "Processing...";
+    const st = tablesStatus[key] || "pending";
+
+    if (st === "downloading") {
+      chip.textContent = "Downloading...";
       chip.className = "status-chip text-[10px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse";
-    } else if (state === "done") {
+    } else if (st === "done") {
       chip.innerHTML = '<i class="fa-solid fa-check mr-1"></i> Fetched';
       chip.className = "status-chip text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-semibold";
+    } else {
+      chip.textContent = "Pending";
+      chip.className = "status-chip text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400";
     }
   });
 }
 
-function renderSuccessfulCompletion(run) {
+function updateDiagramColors(job) {
   const nodeSkidata = document.getElementById("node_skidata");
   const nodeScraper = document.getElementById("node_scraper");
   const nodeTables = document.getElementById("node_tables");
@@ -558,65 +841,125 @@ function renderSuccessfulCompletion(run) {
   const arr1 = document.getElementById("arrow_1");
   const arr2 = document.getElementById("arrow_2");
   const arr3 = document.getElementById("arrow_3");
-  const banner = document.getElementById("executionResultBanner");
+
+  resetDiagramNodes();
 
   const setNode = (el, pillText, state) => {
     el.className = `diagram-node flex-1 p-4 rounded-xl state-${state} text-center shadow-md`;
     el.querySelector(".node-pill").textContent = pillText;
   };
 
-  setNode(nodeSkidata, "Connected", "completed");
-  setNode(nodeScraper, "Completed", "completed");
-  setNode(nodeTables, "All Tables Ready", "completed");
-  setNode(nodeDest, "Verified & Saved", "completed");
+  if (job.status === "failed") {
+    setNode(nodeScraper, "Failed", "failed");
+    setNode(nodeDest, "Aborted", "failed");
+    return;
+  }
 
-  arr1.className = "diagram-arrow arrow-done text-xl px-1";
-  arr2.className = "diagram-arrow arrow-done text-xl px-1";
-  arr3.className = "diagram-arrow arrow-done text-xl px-1";
+  // When job is completed, ALL nodes and arrows are immediately set to completed!
+  if (job.status === "completed") {
+    setNode(nodeSkidata, "Connected", "completed");
+    arr1.className = "diagram-arrow arrow-done text-xl px-1";
 
-  updateTableBadgesLive("done");
+    setNode(nodeScraper, "Completed", "completed");
+    arr2.className = "diagram-arrow arrow-done text-xl px-1";
 
-  banner.classList.remove("hidden");
-  banner.className = "p-4 rounded-xl border text-xs bg-emerald-500/15 border-emerald-500/30 text-emerald-200 space-y-1.5";
-  banner.innerHTML = `
-    <div class="flex items-center justify-between">
+    setNode(nodeTables, "All 4 Tables Ready", "completed");
+    arr3.className = "diagram-arrow arrow-done text-xl px-1";
+
+    setNode(nodeDest, "Verified & Saved", "completed");
+    return;
+  }
+
+  const active = job.active_node || "";
+  const completed = job.completed_nodes || [];
+
+  // Node 1: SkiData Hub
+  if (active === "skidata_auth") {
+    setNode(nodeSkidata, "Authenticating...", "running");
+    arr1.className = "diagram-arrow arrow-active text-xl px-1";
+  } else if (completed.includes("skidata_auth") || active) {
+    setNode(nodeSkidata, "Connected", "completed");
+    arr1.className = "diagram-arrow arrow-done text-xl px-1";
+  }
+
+  // Node 2: Scraper Engine
+  if (active === "scraper_engine") {
+    setNode(nodeScraper, "Scraping Active", "running");
+    arr2.className = "diagram-arrow arrow-active text-xl px-1";
+  } else if (completed.includes("scraper_engine") || active.startsWith("table_") || active === "destination_upload") {
+    setNode(nodeScraper, "Completed", "completed");
+    arr2.className = "diagram-arrow arrow-done text-xl px-1";
+  }
+
+  // Node 3: Tables Ingestion
+  if (active.startsWith("table_")) {
+    let lbl = "Fetching Tables";
+    if (active === "table_revenue") lbl = "Table 1/4 (Revenue)";
+    else if (active === "table_access") lbl = "Table 2/4 (Access)";
+    else if (active === "table_system") lbl = "Table 3/4 (System Event)";
+    else if (active === "table_parking") lbl = "Table 4/4 (Parking)";
+
+    setNode(nodeTables, lbl, "running");
+    arr2.className = "diagram-arrow arrow-done text-xl px-1";
+    arr3.className = "diagram-arrow arrow-active text-xl px-1";
+  } else if (completed.includes("table_parking") || active === "destination_upload") {
+    setNode(nodeTables, "All 4 Tables Ready", "completed");
+    arr3.className = "diagram-arrow arrow-done text-xl px-1";
+  }
+
+  // Node 4: Destination Upload
+  if (active === "destination_upload") {
+    setNode(nodeDest, "Uploading...", "running");
+    arr3.className = "diagram-arrow arrow-active text-xl px-1";
+  }
+}
+
+function resetDiagramNodes() {
+  document.querySelectorAll(".diagram-node").forEach(n => {
+    n.className = "diagram-node flex-1 p-4 rounded-xl state-idle text-center shadow-md";
+    n.querySelector(".node-pill").textContent = "Idle";
+  });
+  document.querySelectorAll(".diagram-arrow").forEach(a => {
+    a.className = "diagram-arrow text-slate-600 text-xl px-1";
+  });
+}
+
+function renderResultBanner(job) {
+  const banner = document.getElementById("executionResultBanner");
+  if (!banner) return;
+
+  if (job.status === "completed") {
+    banner.classList.remove("hidden");
+    const targetFolder = document.getElementById("diagDestFolderText").textContent || "Validated_Docs/old";
+    banner.className = "p-4 rounded-xl border text-xs bg-emerald-500/15 border-emerald-500/30 text-emerald-200 space-y-1";
+    banner.innerHTML = `
       <div class="flex items-center gap-2 font-bold text-emerald-300 text-sm">
         <i class="fa-solid fa-circle-check"></i>
-        <span>GitHub Cloud Workflow Finished Successfully! (Run #${run.run_number})</span>
+        <span>Extraction Finished Successfully!</span>
       </div>
-      <a href="${run.html_url}" target="_blank" class="text-xs text-brand-400 hover:underline">View GitHub Run Logs &rarr;</a>
-    </div>
-    <p>All core tables fetched: <strong>Revenue in Depth, Access in Depth, System Event in Depth, Parking Transactions</strong>.</p>
-    <p class="text-[11px] text-emerald-300/80">Delivered & verified in SharePoint folder: <strong>${escapeHtml(document.getElementById("diagDestFolderText").textContent)}</strong>.</p>
-  `;
-
-  appendConsoleLog(`[Success] GitHub Action Run #${run.run_number} finished with conclusion: SUCCESS.`);
-}
-
-function renderFailure(run) {
-  const nodeScraper = document.getElementById("node_scraper");
-  const banner = document.getElementById("executionResultBanner");
-
-  nodeScraper.className = "diagram-node flex-1 p-4 rounded-xl state-failed text-center shadow-md";
-  nodeScraper.querySelector(".node-pill").textContent = "Failed";
-
-  banner.classList.remove("hidden");
-  banner.className = "p-4 rounded-xl border text-xs bg-rose-500/15 border-rose-500/30 text-rose-200 space-y-1.5";
-  banner.innerHTML = `
-    <div class="flex items-center justify-between">
+      <p>All 4 core tables fetched: <strong>Revenue in Depth, Access in Depth, System Event in Depth, Parking Transactions</strong>.</p>
+      <p class="text-[11px] text-emerald-300/80">Delivered & verified in SharePoint folder: <strong>${escapeHtml(targetFolder)}</strong>.</p>
+    `;
+  } else if (job.status === "failed") {
+    banner.classList.remove("hidden");
+    banner.className = "p-4 rounded-xl border text-xs bg-rose-500/15 border-rose-500/30 text-rose-200 space-y-1";
+    banner.innerHTML = `
       <div class="flex items-center gap-2 font-bold text-rose-300 text-sm">
         <i class="fa-solid fa-circle-xmark"></i>
-        <span>GitHub Action Run #${run.run_number} Failed</span>
+        <span>Workflow Notice</span>
       </div>
-      <a href="${run.html_url}" target="_blank" class="text-xs text-rose-300 hover:underline">View Log on GitHub &rarr;</a>
-    </div>
-    <p>Extraction failed or requested dates were not found in SkiData portal.</p>
-  `;
-
-  appendConsoleLog(`[Error] GitHub Action Run #${run.run_number} concluded with: FAILURE. Check GitHub run logs.`);
+      <p class="font-mono">${escapeHtml(job.error || "Extraction did not complete or requested month was not found in SkiData.")}</p>
+    `;
+  } else {
+    banner.classList.add("hidden");
+  }
 }
 
+let loggedMessages = new Set();
 function appendConsoleLog(msg) {
+  if (loggedMessages.has(msg)) return;
+  loggedMessages.add(msg);
+
   const consoleEl = document.getElementById("liveConsole");
   const ts = new Date().toTimeString().split(" ")[0];
   const p = document.createElement("p");
