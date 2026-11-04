@@ -93,13 +93,7 @@ class OPAPolicyEngine:
         if root_seg in self.FORBIDDEN_FOLDERS:
             return False, (
                 f"OPA-302: Safety Guardrail Triggered - Uploading to production folder '{folder}' is forbidden. "
-                "Only staging or old archive folders (e.g. Validated_Docs/old) are permitted."
-            )
-
-        if root_seg not in self.ALLOWED_ROOT_FOLDERS:
-            return False, (
-                f"OPA-303: Folder '{folder}' does not exist in SharePoint document library. "
-                "Permitted destination folders must be inside 'Validated_Docs' or 'Ski Data 5'."
+                "Only staging, backfill or custom archive folders are permitted."
             )
 
         return True, ""

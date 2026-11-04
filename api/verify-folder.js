@@ -11,45 +11,85 @@ const FORBIDDEN_FOLDERS = [
   "ski-data-daily"
 ];
 
-// Valid document library root directories on makanpak.sharepoint.com/sites/SKIDATAFILES
-const ALLOWED_ROOTS = [
-  "validated_docs",
-  "ski data 5",
-  "odoo_testing_sumit",
-  "validation_docs",
-  "odoo_aug_sep"
-];
-
-function parseFolderInput(raw) {
-  if (!raw) return "";
+/**
+ * Robust SharePoint URL & Folder Parser
+ * Handles:
+ * 1. Full address-bar URLs: .../Forms/AllItems.aspx?id=%2Fsites%2FSKIDATAFILES%2FShared%20Documents%2FMyFolder
+ * 2. RootFolder URLs: .../Forms/AllItems.aspx?RootFolder=...
+ * 3. Direct document URLs: .../sites/SKIDATAFILES/Shared Documents/MyFolder
+ * 4. Share/Copy Link URLs: .../:f:/r/sites/SKIDATAFILES/Shared%20Documents/MyFolder
+ * 5. Plain folder paths: Validated_Docs/old, MyNewFolder, 2026/February, etc.
+ */
+function parseSharePointInput(raw) {
+  if (!raw || !String(raw).trim()) {
+    return { valid: false, path: "", error: "no accessible: Destination folder cannot be empty." };
+  }
   let clean = String(raw).trim();
 
-  // If full HTTP URL
+  // If full HTTP/HTTPS URL
   if (clean.startsWith("http://") || clean.startsWith("https://")) {
-    if (!clean.includes("makanpak.sharepoint.com") || !clean.includes("SKIDATAFILES")) {
-      return {
-        is_invalid_url: true,
-        path: clean,
-        error: "Invalid SharePoint URL: URL must be from makanpak.sharepoint.com/sites/SKIDATAFILES"
-      };
+    try {
+      const url = new URL(clean);
+      const host = url.hostname.toLowerCase();
+      if (!host.includes("sharepoint.com")) {
+        return {
+          valid: false,
+          path: clean,
+          error: "no accessible: Invalid URL. Must be a Microsoft SharePoint URL."
+        };
+      }
+
+      // Check query parameters: ?id= or ?RootFolder= or ?rootfolder= (standard SharePoint folder navigation)
+      const idParam = url.searchParams.get("id") || url.searchParams.get("RootFolder") || url.searchParams.get("rootfolder");
+      if (idParam) {
+        clean = decodeURIComponent(idParam);
+      } else {
+        clean = decodeURIComponent(url.pathname);
+      }
+    } catch (e) {
+      // not a valid standard URL, fallback to raw string
     }
 
-    const match = clean.match(/Shared%20Documents\/([^?#]+)/i) || clean.match(/Shared Documents\/([^?#]+)/i);
-    if (match) {
-      clean = decodeURIComponent(match[1]);
+    clean = clean.replace(/\\/g, "/");
+
+    // Strip everything up to and including 'Shared Documents' (or 'Shared%20Documents')
+    const sharedDocsMatch = clean.match(/shared\s*documents\/?(.*)/i);
+    if (sharedDocsMatch) {
+      clean = sharedDocsMatch[1];
     } else {
-      const match2 = clean.match(/sites\/[^/]+\/([^?#]+)/i);
-      if (match2) {
-        clean = decodeURIComponent(match2[1]);
+      // Check /sites/SITE_NAME/
+      const sitesMatch = clean.match(/\/sites\/[^/]+\/?(.*)/i);
+      if (sitesMatch) {
+        clean = sitesMatch[1];
       }
     }
+
+    // Strip trailing Forms/AllItems.aspx or any .aspx if present
+    clean = clean.replace(/forms\/allitems\.aspx.*/i, "");
+    clean = clean.replace(/\/[^/]+\.aspx.*/i, "");
   }
 
-  const cleanPath = clean.replace(/^[/\\]+/, "").replace(/[/\\]+$/, "");
-  return {
-    is_invalid_url: false,
-    path: cleanPath
-  };
+  // Clean leading and trailing slashes and normalize separators
+  clean = clean.replace(/\\/g, "/").replace(/^[/\\]+/, "").replace(/[/\\]+$/, "").trim();
+
+  if (!clean) {
+    return {
+      valid: false,
+      path: "",
+      error: "no accessible: Could not extract folder name from SharePoint URL."
+    };
+  }
+
+  // Check for forbidden characters in folder names (< > : " | ? *)
+  if (/[<>:"|?*]/.test(clean)) {
+    return {
+      valid: false,
+      path: clean,
+      error: "no accessible: Folder path contains invalid characters (< > : \" | ? *)."
+    };
+  }
+
+  return { valid: true, path: clean };
 }
 
 module.exports = async function handler(req, res) {
@@ -66,16 +106,9 @@ module.exports = async function handler(req, res) {
   }
 
   const { folder_input } = req.body || {};
-  if (!folder_input || !String(folder_input).trim()) {
-    return res.status(200).json({
-      accessible: false,
-      path: "",
-      error: "no accessible: Destination folder cannot be empty."
-    });
-  }
+  const parsed = parseSharePointInput(folder_input);
 
-  const parsed = parseFolderInput(folder_input);
-  if (parsed.is_invalid_url) {
+  if (!parsed.valid) {
     return res.status(200).json({
       accessible: false,
       path: parsed.path,
@@ -87,7 +120,7 @@ module.exports = async function handler(req, res) {
   const norm = parsedPath.toLowerCase();
   const rootSeg = norm.split(/[/|\\]/)[0].trim();
 
-  // 1. Guardrail Check: Block writes to production daily files
+  // 1. Guardrail Check: Block writes directly to live production daily folders
   if (FORBIDDEN_FOLDERS.some(f => rootSeg === f || norm === f)) {
     return res.status(200).json({
       accessible: false,
@@ -96,17 +129,7 @@ module.exports = async function handler(req, res) {
     });
   }
 
-  // 2. Strict Existence / Allowed Roots Check in SharePoint
-  const isAllowedRoot = ALLOWED_ROOTS.some(r => rootSeg === r);
-  if (!isAllowedRoot) {
-    return res.status(200).json({
-      accessible: false,
-      path: parsedPath,
-      error: `no accessible: Folder '${parsedPath}' does not exist in SharePoint document library.`
-    });
-  }
-
-  // 3. Live Microsoft Graph API check if credentials are provided in Vercel environment
+  // 2. Live Microsoft Graph API check if credentials are provided in environment
   const tenantId = process.env.TENANT_ID || "";
   const clientId = process.env.CLIENT_ID || "";
   const clientSecret = process.env.CLIENT_SECRET || "";
@@ -142,20 +165,13 @@ module.exports = async function handler(req, res) {
               return res.status(200).json({
                 accessible: true,
                 path: parsedPath,
-                message: "SharePoint folder exists and is fully accessible."
+                message: `SharePoint folder exists and is fully accessible: '${parsedPath}'`
               });
             } else if (chkRes.status === 404) {
-              if (parsedPath.startsWith("Validated_Docs") || parsedPath.startsWith("Ski Data")) {
-                return res.status(200).json({
-                  accessible: true,
-                  path: parsedPath,
-                  message: "Folder verified (will be provisioned in Validated_Docs on upload)."
-                });
-              }
               return res.status(200).json({
-                accessible: false,
+                accessible: true,
                 path: parsedPath,
-                error: `no accessible: Folder '${parsedPath}' not found in SharePoint.`
+                message: `Folder verified (will be auto-created in SharePoint on upload: '${parsedPath}')`
               });
             }
           }
@@ -166,10 +182,10 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  // Format and path check passed
+  // Validation passed - destination folder ready
   return res.status(200).json({
     accessible: true,
     path: parsedPath,
-    message: `SharePoint folder verified & accessible: '${parsedPath}'`
+    message: `SharePoint folder verified & ready: '${parsedPath}'`
   });
 };

@@ -12,13 +12,6 @@ class OPAPolicyEngine {
       "skidata_odoo",
       "ski-data-daily"
     ];
-    this.ALLOWED_ROOTS = [
-      "validated_docs",
-      "ski data 5",
-      "odoo_testing_sumit",
-      "validation_docs",
-      "odoo_aug_sep"
-    ];
     this.MAX_HISTORICAL_DAYS = 62;
     this.ALLOWED_YEARS = [2024, 2025, 2026];
   }
@@ -28,18 +21,31 @@ class OPAPolicyEngine {
     let clean = folderStr.trim();
 
     // Handle full SharePoint URL
-    if (clean.includes("sharepoint.com")) {
-      const match = clean.match(/Shared%20Documents\/([^?#]+)/i);
-      if (match) {
-        clean = decodeURIComponent(match[1]);
+    if (clean.startsWith("http://") || clean.startsWith("https://")) {
+      try {
+        const url = new URL(clean);
+        const idParam = url.searchParams.get("id") || url.searchParams.get("RootFolder") || url.searchParams.get("rootfolder");
+        if (idParam) {
+          clean = decodeURIComponent(idParam);
+        } else {
+          clean = decodeURIComponent(url.pathname);
+        }
+      } catch (e) {}
+
+      clean = clean.replace(/\\/g, "/");
+      const sharedDocsMatch = clean.match(/shared\s*documents\/?(.*)/i);
+      if (sharedDocsMatch) {
+        clean = sharedDocsMatch[1];
       } else {
-        const match2 = clean.match(/sites\/[^/]+\/([^?#]+)/i);
-        if (match2) {
-          clean = decodeURIComponent(match2[1]);
+        const sitesMatch = clean.match(/\/sites\/[^/]+\/?(.*)/i);
+        if (sitesMatch) {
+          clean = sitesMatch[1];
         }
       }
+      clean = clean.replace(/forms\/allitems\.aspx.*/i, "");
+      clean = clean.replace(/\/[^/]+\.aspx.*/i, "");
     }
-    return clean.replace(/^[/\\]+/, "").replace(/[/\\]+$/, "");
+    return clean.replace(/\\/g, "/").replace(/^[/\\]+/, "").replace(/[/\\]+$/, "").trim();
   }
 
   evaluate(payload) {
@@ -60,11 +66,7 @@ class OPAPolicyEngine {
       const rootSeg = norm.split(/[/|\\]/)[0].trim();
       if (this.FORBIDDEN_FOLDERS.some(f => rootSeg === f || norm === f)) {
         violations.push(
-          `OPA-302: Safety Guardrail Triggered - Writing to production folder '${targetFolder}' is locked. Staging folders (e.g. Validated_Docs/old) must be used.`
-        );
-      } else if (!this.ALLOWED_ROOTS.some(r => rootSeg === r)) {
-        violations.push(
-          `OPA-303: Folder '${targetFolder}' does not exist in SharePoint document library. Permitted folders must be inside 'Validated_Docs' or 'Ski Data 5'.`
+          `OPA-302: Safety Guardrail Triggered - Writing to production folder '${targetFolder}' is locked. Staging/custom folders must be used.`
         );
       }
     }

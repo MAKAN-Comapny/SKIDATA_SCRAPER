@@ -170,13 +170,12 @@ async function verifyDailyFolder() {
     const data = await res.json();
 
     if (data.accessible) {
-      statusText.innerHTML = `<i class="fa-solid fa-circle-check text-emerald-400"></i> ${data.message || 'Folder verified & accessible'}`;
+      input.dataset.cleanPath = data.path;
+      statusText.innerHTML = `<i class="fa-solid fa-circle-check text-emerald-400"></i> SharePoint folder verified: <strong>${data.path}</strong>`;
       statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-emerald-400";
       runBtn.disabled = false;
-      if (activeTab === "daily") {
-        diagDestText.textContent = data.path || val;
-        diagDestText.title = data.path || val;
-      }
+      diagDestText.textContent = data.path;
+      diagDestText.title = data.path;
     } else {
       // User requirement: "if not write a message below 'no accessible'"
       const err = data.error || 'Access Denied';
@@ -216,13 +215,12 @@ async function verifyHistFolder() {
     const data = await res.json();
 
     if (data.accessible) {
-      statusText.innerHTML = `<i class="fa-solid fa-circle-check text-emerald-400"></i> Folder verified & ready (${data.path})`;
+      input.dataset.cleanPath = data.path;
+      statusText.innerHTML = `<i class="fa-solid fa-circle-check text-emerald-400"></i> SharePoint folder verified: <strong>${data.path}</strong>`;
       statusDiv.className = "mt-2 text-xs flex items-center gap-1.5 font-medium text-emerald-400";
       runBtn.disabled = false;
-      if (activeTab === "hist") {
-        diagDestText.textContent = data.path || val;
-        diagDestText.title = data.path || val;
-      }
+      diagDestText.textContent = data.path;
+      diagDestText.title = data.path;
     } else {
       // User requirement: "if not write a message below 'no accessible'"
       const err = data.error || 'Access Denied';
@@ -298,7 +296,8 @@ function initJobActions() {
   const clearLogsBtn = document.getElementById("clearLogsBtn");
 
   runDailyBtn.addEventListener("click", async () => {
-    const targetFolder = document.getElementById("dailyFolderInput").value.trim();
+    const dailyInput = document.getElementById("dailyFolderInput");
+    const targetFolder = dailyInput.dataset.cleanPath || dailyInput.value.trim();
     await triggerExecution({
       mode: "daily",
       target_folder: targetFolder
@@ -307,7 +306,8 @@ function initJobActions() {
 
   runHistBtn.addEventListener("click", async () => {
     const mode = document.querySelector('input[name="histMode"]:checked').value;
-    const targetFolder = document.getElementById("histFolderInput").value.trim();
+    const histInput = document.getElementById("histFolderInput");
+    const targetFolder = histInput.dataset.cleanPath || histInput.value.trim();
     const payload = { mode, target_folder: targetFolder, operation: "export" };
 
     if (mode === "months") {

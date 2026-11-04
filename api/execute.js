@@ -17,13 +17,77 @@ const FORBIDDEN_FOLDERS = [
   "ski-data-daily"
 ];
 
-const ALLOWED_ROOTS = [
-  "validated_docs",
-  "ski data 5",
-  "odoo_testing_sumit",
-  "validation_docs",
-  "odoo_aug_sep"
-];
+function parseSharePointInput(raw) {
+  if (!raw || !String(raw).trim()) {
+    return { valid: false, path: "", error: "Destination folder cannot be empty." };
+  }
+  let clean = String(raw).trim();
+
+  // If full HTTP/HTTPS URL
+  if (clean.startsWith("http://") || clean.startsWith("https://")) {
+    try {
+      const url = new URL(clean);
+      const host = url.hostname.toLowerCase();
+      if (!host.includes("sharepoint.com")) {
+        return {
+          valid: false,
+          path: clean,
+          error: "Invalid URL. Must be a Microsoft SharePoint URL."
+        };
+      }
+
+      // Check query parameters: ?id= or ?RootFolder= or ?rootfolder= (standard SharePoint folder navigation)
+      const idParam = url.searchParams.get("id") || url.searchParams.get("RootFolder") || url.searchParams.get("rootfolder");
+      if (idParam) {
+        clean = decodeURIComponent(idParam);
+      } else {
+        clean = decodeURIComponent(url.pathname);
+      }
+    } catch (e) {
+      // not a valid standard URL
+    }
+
+    clean = clean.replace(/\\/g, "/");
+
+    // Strip everything up to and including 'Shared Documents' (or 'Shared%20Documents')
+    const sharedDocsMatch = clean.match(/shared\s*documents\/?(.*)/i);
+    if (sharedDocsMatch) {
+      clean = sharedDocsMatch[1];
+    } else {
+      // Check /sites/SITE_NAME/
+      const sitesMatch = clean.match(/\/sites\/[^/]+\/?(.*)/i);
+      if (sitesMatch) {
+        clean = sitesMatch[1];
+      }
+    }
+
+    // Strip trailing Forms/AllItems.aspx or any .aspx if present
+    clean = clean.replace(/forms\/allitems\.aspx.*/i, "");
+    clean = clean.replace(/\/[^/]+\.aspx.*/i, "");
+  }
+
+  // Clean leading and trailing slashes and normalize separators
+  clean = clean.replace(/\\/g, "/").replace(/^[/\\]+/, "").replace(/[/\\]+$/, "").trim();
+
+  if (!clean) {
+    return {
+      valid: false,
+      path: "",
+      error: "Could not extract folder name from SharePoint URL."
+    };
+  }
+
+  // Check for forbidden characters in folder names (< > : " | ? *)
+  if (/[<>:"|?*]/.test(clean)) {
+    return {
+      valid: false,
+      path: clean,
+      error: "Folder path contains invalid characters (< > : \" | ? *)."
+    };
+  }
+
+  return { valid: true, path: clean };
+}
 
 function evaluateOPA(payload) {
   const violations = [];
@@ -34,13 +98,18 @@ function evaluateOPA(payload) {
     violations.push("OPA-201: Forbidden operation. Only strictly READ-ONLY data export is permitted.");
   }
 
-  // Folder guardrail check
-  const folder = String(payload.target_folder || "").trim().toLowerCase();
-  const rootSeg = folder.split(/[/|\\]/)[0].trim();
-  if (FORBIDDEN_FOLDERS.some(f => rootSeg === f || folder === f)) {
-    violations.push("OPA-302: Safety Guardrail Triggered - Production daily folders are locked.");
-  } else if (folder && !ALLOWED_ROOTS.some(r => rootSeg === r)) {
-    violations.push(`OPA-303: Folder '${payload.target_folder}' does not exist in SharePoint document library. Permitted destination folders must be inside 'Validated_Docs' or 'Ski Data 5'.`);
+  // Folder guardrail check & URL extraction
+  const parsedFolder = parseSharePointInput(payload.target_folder || "Validated_Docs/old");
+  if (!parsedFolder.valid) {
+    violations.push(`OPA-301: ${parsedFolder.error}`);
+  } else {
+    // Store normalized clean relative path
+    payload.target_folder = parsedFolder.path;
+    const folder = parsedFolder.path.toLowerCase();
+    const rootSeg = folder.split(/[/|\\]/)[0].trim();
+    if (FORBIDDEN_FOLDERS.some(f => rootSeg === f || folder === f)) {
+      violations.push(`OPA-302: Safety Guardrail Triggered - Production daily folder '${parsedFolder.path}' is locked. Staging/custom folders must be used.`);
+    }
   }
 
   // Date range limits
@@ -68,25 +137,23 @@ function evaluateOPA(payload) {
   } else if (payload.mode === "single_date") {
     const { target_date } = payload;
     if (!target_date) {
-      violations.push("OPA-406: Single date mode requires target_date.");
+      violations.push("OPA-402: Single date mode requires target_date.");
     } else {
-      const singleDt = new Date(target_date);
-      if (singleDt > today) {
-        violations.push("OPA-408: Target date cannot be in the future.");
+      const tDt = new Date(target_date);
+      if (tDt > today) {
+        violations.push("OPA-404: Target date cannot be in the future.");
       }
     }
-  }
-
-  // Historical scope
-  if (payload.mode === "months") {
-    const years = payload.years || [];
-    const months = payload.months || [];
-    if (years.length === 0 || months.length === 0) {
-      violations.push("OPA-501: At least one year and one month must be selected.");
+  } else if (payload.mode === "months") {
+    const { months, years } = payload;
+    if (!months || months.length === 0) {
+      violations.push("OPA-501: At least one month must be selected.");
     }
-    const allowedYears = [2024, 2025, 2026];
-    for (const y of years) {
-      if (!allowedYears.includes(Number(y))) {
+    if (!years || years.length === 0) {
+      violations.push("OPA-502: At least one year must be selected.");
+    }
+    for (const y of years || []) {
+      if (y < 2024 || y > 2026) {
         violations.push(`OPA-503: Year ${y} is outside supported historical boundary (2024-2026).`);
       }
     }
@@ -127,7 +194,7 @@ module.exports = async function handler(req, res) {
     });
   }
 
-  // Build GitHub Actions input parameters
+  // Build GitHub Actions input parameters with clean target_folder
   const ghInputs = {
     mode: payload.mode === "daily" ? "daily" : "historical",
     target_folder: payload.target_folder || "Validated_Docs/old"
@@ -161,23 +228,19 @@ module.exports = async function handler(req, res) {
     if (!ghRes.ok) {
       const errText = await ghRes.text();
       return res.status(ghRes.status).json({
-        detail: `GitHub Dispatch Error (${ghRes.status}): ${errText}`
+        detail: `GitHub Actions dispatch failed (${ghRes.status}): ${errText}`
       });
     }
 
     return res.status(200).json({
-      success: true,
-      message: `Extraction workflow launched on branch '${TARGET_BRANCH}'. Cloud runner is executing.`,
-      job: {
-        mode: payload.mode,
-        target_folder: ghInputs.target_folder,
-        branch: TARGET_BRANCH
-      }
+      ok: true,
+      message: `Workflow dispatched successfully to branch '${TARGET_BRANCH}'. Target SharePoint: '${ghInputs.target_folder}'.`,
+      inputs: ghInputs
     });
 
   } catch (err) {
     return res.status(500).json({
-      detail: "Failed to dispatch workflow: " + err.message
+      detail: `Dispatch request exception: ${err.message}`
     });
   }
 };
