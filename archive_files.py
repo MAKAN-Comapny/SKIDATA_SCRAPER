@@ -10,7 +10,7 @@ Key Guarantees:
      - Leaves ZERO residual files in the source folder (100% single-source-of-truth).
      - Automated fallback to Stream-Copy + Verify + Delete-Source if direct PATCH is blocked.
   2. Subfolder Protection:
-     - Folders (including 'old', 'oct_test', etc.) and non-Excel items are strictly ignored and never moved.
+     - Folders (including 'old') and non-Excel items are strictly ignored and never moved.
   3. Smart Month & Date Detection:
      - Matches month abbreviations/names (e.g. 'Oct', 'October' -> 'Oct' or reuses existing 'October').
      - If no month name is found, falls back directly to the current date in Riyadh AST (e.g. '10-Nov-2026').
@@ -43,8 +43,8 @@ CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 SITE_NAME = os.getenv("SHAREPOINT_SITE_NAME")
 
-DEFAULT_SOURCE_FOLDER = "Odoo_aug_sep"
-DEFAULT_ARCHIVE_ROOT = "Odoo_aug_sep/oct_test"
+DEFAULT_SOURCE_FOLDER = "Validated_Docs"
+DEFAULT_ARCHIVE_ROOT = "Validated_Docs/old"
 
 # 12 Month Keywords and Aliases
 MONTH_KEYWORDS = {
@@ -468,7 +468,7 @@ def archive_validated_docs(
 
     print(f"\n[Classify] Identified {len(candidate_files)} Excel file(s) eligible for archival.")
 
-    # 4. Read existing subfolders inside archive_root (e.g. 'oct_test' or 'old') to reuse existing naming
+    # 4. Read existing subfolders inside archive_root (e.g. 'old') to reuse existing naming
     archive_children = list_folder_children(site_id, headers, archive_root)
     existing_subfolders = [
         item["name"] for item in archive_children if "folder" in item
