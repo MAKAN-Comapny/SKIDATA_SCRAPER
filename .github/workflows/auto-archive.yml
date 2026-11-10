@@ -10,11 +10,11 @@ on:
       source_folder:
         description: "Source SharePoint folder containing active Excel exports"
         required: false
-        default: "Validated_Docs"
+        default: "Odoo_aug_sep"
       archive_root:
-        description: "Target SharePoint archive directory (e.g., Validated_Docs/old)"
+        description: "Target SharePoint archive directory"
         required: false
-        default: "Validated_Docs/old"
+        default: "Odoo_aug_sep/oct_test"
       dry_run:
         description: "Dry run mode (scan & classify only, do not move files)"
         required: false
@@ -56,6 +56,6 @@ jobs:
             EXTRA_ARGS="--dry-run"
           fi
           python archive_files.py \
-            --source "${{ inputs.source_folder || 'Validated_Docs' }}" \
-            --dest-root "${{ inputs.archive_root || 'Validated_Docs/old' }}" \
+            --source "${{ inputs.source_folder || 'Odoo_aug_sep' }}" \
+            --dest-root "${{ inputs.archive_root || 'Odoo_aug_sep/oct_test' }}" \
             $EXTRA_ARGS

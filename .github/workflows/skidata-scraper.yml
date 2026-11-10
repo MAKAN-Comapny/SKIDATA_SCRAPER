@@ -5,13 +5,14 @@ on:
     # Allow manual trigger with flexible options
     inputs:
       mode:
-        description: "Option to Run: 'daily' (Last 5 days -> Ski Data 5) or 'historical' (Month/Range -> Validated_Docs)"
+        description: "Option to Run: 'daily' (Last 5 days -> Ski Data 5), 'historical' (Month/Range -> Validated_Docs), or 'archive' (Auto-move files to archive)"
         required: false
         default: "daily"
         type: choice
         options:
           - daily
           - historical
+          - archive
       month:
         description: "Historical Month: 'both', 'August', 'September', 'Jul', etc. (Used if mode=historical)"
         required: false
@@ -95,7 +96,13 @@ jobs:
         run: |
           TARGET_DIR="${{ inputs.target_folder || 'Validated_Docs/old' }}"
           MERGE_OPT="${{ inputs.merge_option || 'separate' }}"
-          if [ "${{ inputs.mode }}" = "historical" ]; then
+          if [ "${{ inputs.mode }}" = "archive" ]; then
+            echo "=========================================================="
+            echo "RUNNING SHAREPOINT ARCHIVER & FILE MOVER"
+            echo "Source: Odoo_aug_sep -> Target: Odoo_aug_sep/oct_test"
+            echo "=========================================================="
+            python archive_files.py --source "Odoo_aug_sep" --dest-root "Odoo_aug_sep/oct_test"
+          elif [ "${{ inputs.mode }}" = "historical" ]; then
             echo "=========================================================="
             echo "RUNNING HISTORICAL / RANGE DATA SCRIPT"
             echo "Target SharePoint: $TARGET_DIR"

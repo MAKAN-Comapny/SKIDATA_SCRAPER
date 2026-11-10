@@ -39,8 +39,8 @@ CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 SITE_NAME = os.getenv("SHAREPOINT_SITE_NAME")
 
-DEFAULT_SOURCE_FOLDER = "Validated_Docs"
-DEFAULT_ARCHIVE_ROOT = "Validated_Docs/old"
+DEFAULT_SOURCE_FOLDER = "Odoo_aug_sep"
+DEFAULT_ARCHIVE_ROOT = "Odoo_aug_sep/oct_test"
 
 # 12 Month Keywords and Aliases
 MONTH_KEYWORDS = {
@@ -197,6 +197,23 @@ def detect_target_subfolder(filename: str, existing_subfolders: List[str]) -> st
     return riyadh_now.strftime("%d-%b-%Y")
 
 
+def resolve_destination_path(archive_root: str, target_subfolder: str) -> str:
+    """
+    Computes the full destination folder path.
+    If archive_root already is the target folder (e.g. ends with 'oct_test' matching month 'Oct'),
+    it places files directly into archive_root without creating a redundant nested subfolder.
+    Otherwise, appends /{target_subfolder}.
+    """
+    root_clean = archive_root.strip("/")
+    last_seg = root_clean.split("/")[-1].lower()
+    sub_lower = target_subfolder.lower()
+
+    if sub_lower in last_seg or last_seg.startswith(sub_lower):
+        return root_clean
+
+    return f"{root_clean}/{target_subfolder}"
+
+
 def move_item_atomic(
     site_id: str,
     headers: dict,
@@ -323,14 +340,14 @@ def archive_validated_docs(
     ]
     print(f"[Classify] Existing subfolder(s) in '{archive_root}': {existing_subfolders or 'None'}")
 
-    # 5. Group files by target subfolder
+    # 5. Group files by target destination path
     moves_planned = []
-    needed_subfolders = set()
+    needed_dest_paths = set()
 
     for item in candidate_files:
         filename = item["name"]
         target_subfolder = detect_target_subfolder(filename, existing_subfolders)
-        full_dest_path = f"{archive_root.strip('/')}/{target_subfolder}"
+        full_dest_path = resolve_destination_path(archive_root, target_subfolder)
         moves_planned.append({
             "id": item["id"],
             "name": filename,
@@ -338,21 +355,20 @@ def archive_validated_docs(
             "subfolder": target_subfolder,
             "full_dest_path": full_dest_path,
         })
-        needed_subfolders.add(target_subfolder)
-        print(f"  -> '{filename}' ==> '{target_subfolder}'")
+        needed_dest_paths.add(full_dest_path)
+        print(f"  -> '{filename}' ==> '{full_dest_path}'")
 
     if dry_run:
         print("\n[Dry Run] Completed classification without moving any files.")
         return
 
-    # 6. Ensure all target subfolders exist and obtain their SharePoint folder IDs
-    print(f"\n[Prepare] Ensuring {len(needed_subfolders)} target subfolder(s) exist in SharePoint...")
-    subfolder_ids = {}
-    for subf in needed_subfolders:
-        full_path = f"{archive_root.strip('/')}/{subf}"
-        fid = get_or_create_folder_id(site_id, headers, full_path)
-        subfolder_ids[subf] = fid
-        print(f"  [OK] '{full_path}' (Folder ID: {fid})")
+    # 6. Ensure all target folders exist and obtain their SharePoint folder IDs
+    print(f"\n[Prepare] Ensuring {len(needed_dest_paths)} target destination folder(s) exist in SharePoint...")
+    dest_folder_ids = {}
+    for dest_p in needed_dest_paths:
+        fid = get_or_create_folder_id(site_id, headers, dest_p)
+        dest_folder_ids[dest_p] = fid
+        print(f"  [OK] '{dest_p}' (Folder ID: {fid})")
 
     # 7. Execute Atomic Moves
     print(f"\n[Move] Beginning atomic move of {len(moves_planned)} file(s)...")
@@ -362,10 +378,10 @@ def archive_validated_docs(
     for idx, plan in enumerate(moves_planned, start=1):
         item_id = plan["id"]
         filename = plan["name"]
-        subf = plan["subfolder"]
-        dest_fid = subfolder_ids[subf]
+        dest_p = plan["full_dest_path"]
+        dest_fid = dest_folder_ids[dest_p]
 
-        print(f"  [{idx}/{len(moves_planned)}] Moving '{filename}' -> '{plan['full_dest_path']}'...")
+        print(f"  [{idx}/{len(moves_planned)}] Moving '{filename}' -> '{dest_p}'...")
         try:
             result = move_item_atomic(
                 site_id=site_id,
