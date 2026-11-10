@@ -556,8 +556,13 @@ async def run_parking_transactions_flow(
             prev_n = n
 
         print("Merging day files into consolidated Parking-Transactions...")
-        dfs = [pd.read_excel(f) for f in day_files]
+        dfs = [pd.read_excel(f, dtype=str) for f in day_files]
         merged_df = pd.concat(dfs, ignore_index=True)
+        # Ensure ticket/serial and receipt columns are strictly strings (prevent scientific notation)
+        for col in merged_df.columns:
+            if any(term in str(col).lower() for term in ["serial", "ticket", "receipt", "plate"]):
+                merged_df[col] = merged_df[col].astype(str).str.replace(r"\.0$", "", regex=True)
+                merged_df.loc[merged_df[col].str.lower().isin(["nan", "none"]), col] = ""
         merged_df.to_excel(target_path, index=False)
         print(f"SUCCESS: Saved {len(merged_df)} total rows across {days_count} days to: {target_path}")
 
