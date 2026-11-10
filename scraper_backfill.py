@@ -565,8 +565,13 @@ async def run_parking_transactions_flow(
         raise RuntimeError(f"No daily parking transactions were extracted for range {start_date} -> {end_date}.")
 
     print(f"\nMerging {len(valid_day_files)} daily files into {target_path}...")
-    dfs = [pd.read_excel(f) for f in valid_day_files]
+    dfs = [pd.read_excel(f, dtype=str) for f in valid_day_files]
     merged_df = pd.concat(dfs, ignore_index=True)
+    # Ensure ticket/serial and receipt columns are strictly strings (prevent scientific notation)
+    for col in merged_df.columns:
+        if any(term in str(col).lower() for term in ["serial", "ticket", "receipt", "plate"]):
+            merged_df[col] = merged_df[col].astype(str).str.replace(r"\.0$", "", regex=True)
+            merged_df.loc[merged_df[col].str.lower().isin(["nan", "none"]), col] = ""
     merged_df.to_excel(target_path, index=False)
     print(f"SUCCESS: Consolidated {len(merged_df):,} total rows to {target_path} ({os.path.getsize(target_path):,} bytes)!")
 
