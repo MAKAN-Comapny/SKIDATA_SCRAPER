@@ -20,6 +20,9 @@ on:
         required: false
         type: boolean
         default: false
+  repository_dispatch:
+    # Allows external triggers (e.g. cron-job.org) via GitHub API
+    types: [auto-archive-trigger, manual-trigger]
 
 concurrency:
   group: auto-archive-sharepoint

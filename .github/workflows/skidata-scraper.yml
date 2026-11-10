@@ -11,6 +11,9 @@ on:
         description: "Target SharePoint archive directory"
         required: false
         default: "Validated_Docs/old"
+  repository_dispatch:
+    # Allows external triggers (e.g. cron-job.org) via GitHub API
+    types: [auto-archive-trigger, manual-trigger]
   schedule:
     # Everyday at 16:00 UTC = 19:00 (7:00 PM) Riyadh / Saudi Time (AST)
     - cron: "0 16 * * *"
