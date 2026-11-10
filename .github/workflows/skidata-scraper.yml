@@ -1,62 +1,28 @@
-name: SKIDATA Scraper
+name: SKIDATA Automatic File Archival
 
 on:
   workflow_dispatch:
-    # Allow manual trigger with flexible options
     inputs:
-      mode:
-        description: "Option to Run: 'daily' (Last 5 days -> Ski Data 5), 'historical' (Month/Range -> Validated_Docs), or 'archive' (Auto-move files to archive)"
+      source_folder:
+        description: "Source SharePoint folder containing active Excel exports"
         required: false
-        default: "daily"
-        type: choice
-        options:
-          - daily
-          - historical
-          - archive
-      month:
-        description: "Historical Month: 'both', 'August', 'September', 'Jul', etc. (Used if mode=historical)"
+        default: "Odoo_aug_sep"
+      archive_root:
+        description: "Target SharePoint archive directory"
         required: false
-        default: "both"
-      date_range:
-        description: "Historical Date Range: e.g. '10-10-2026 to 23-10-2026' (Overrides month if set)"
-        required: false
-        default: ""
-      days_count:
-        description: "Daily Script: Number of rolling past days to fetch (default: 5)"
-        required: false
-        default: "5"
-      target_date:
-        description: "Daily Script: Specific single date (YYYY-MM-DD), leave empty for rolling days"
-        required: false
-        default: ""
-      target_folder:
-        description: "Target SharePoint folder (default: Validated_Docs/old)"
-        required: false
-        default: "Validated_Docs/old"
-      merge_option:
-        description: "File structure: 'separate' (daywise), 'monthly' (1 file per month), 'merged' (consolidated master file)"
-        required: false
-        default: "separate"
-        type: choice
-        options:
-          - separate
-          - monthly
-          - merged
-  repository_dispatch:
-    # Allows external triggers (e.g. cron-job.org) via GitHub API
-    types: [manual-trigger]
+        default: "Odoo_aug_sep/oct_test"
   schedule:
-    # Everyday at 05:00 UTC = 08:00 AM Saudi Time (AST)
-    - cron: "0 5 * * *"
+    # Everyday at 16:00 UTC = 19:00 (7:00 PM) Riyadh / Saudi Time (AST)
+    - cron: "0 16 * * *"
 
 concurrency:
-  group: skidata-scraper
+  group: skidata-auto-archive
   cancel-in-progress: false
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
@@ -70,55 +36,18 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install requests python-dotenv
 
-      - name: Install Playwright browsers
-        run: playwright install --with-deps chromium
-
-      - name: Run SKIDATA pipeline
+      - name: Run SharePoint File Archiver
         env:
-          HEADLESS: "true"
-          TARGET_DATE: ${{ inputs.target_date }}
-          DAYS_COUNT: ${{ inputs.days_count || '5' }}
-          TARGET_FOLDER_PATH: ${{ inputs.target_folder || 'Validated_Docs/old' }}
-          TARGET_FOLDER_PATH_BACKFILL: ${{ inputs.target_folder || 'Validated_Docs/old' }}
-          TARGET_FOLDER_PATH_ODOO: "Ski Data 5"
-          SKIP_ODOO_EXPORT: "true"
-          MERGE_OPTION: ${{ inputs.merge_option || 'separate' }}
-          SKIDATA_URL: ${{ secrets.SKIDATA_URL }}
-          SKIDATA_TENANT: ${{ secrets.SKIDATA_TENANT }}
-          SKIDATA_LOGIN: ${{ secrets.SKIDATA_LOGIN }}
-          SKIDATA_PASSWORD: ${{ secrets.SKIDATA_PASSWORD }}
           TENANT_ID: ${{ secrets.TENANT_ID }}
           CLIENT_ID: ${{ secrets.CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
           SHAREPOINT_SITE_NAME: ${{ secrets.SHAREPOINT_SITE_NAME }}
         run: |
-          TARGET_DIR="${{ inputs.target_folder || 'Validated_Docs/old' }}"
-          MERGE_OPT="${{ inputs.merge_option || 'separate' }}"
-          if [ "${{ inputs.mode }}" = "archive" ]; then
-            echo "=========================================================="
-            echo "RUNNING SHAREPOINT ARCHIVER & FILE MOVER"
-            echo "Source: Odoo_aug_sep -> Target: Odoo_aug_sep/oct_test"
-            echo "=========================================================="
-            python archive_files.py --source "Odoo_aug_sep" --dest-root "Odoo_aug_sep/oct_test"
-          elif [ "${{ inputs.mode }}" = "historical" ]; then
-            echo "=========================================================="
-            echo "RUNNING HISTORICAL / RANGE DATA SCRIPT"
-            echo "Target SharePoint: $TARGET_DIR"
-            echo "File Structure:    $MERGE_OPT"
-            echo "=========================================================="
-            if [ -n "${{ inputs.date_range }}" ]; then
-              python main_backfill.py --range "${{ inputs.date_range }}" --folder "$TARGET_DIR" --merge "$MERGE_OPT" --headless
-            else
-              python main_backfill.py --month "${{ inputs.month || 'both' }}" --folder "$TARGET_DIR" --merge "$MERGE_OPT" --headless
-            fi
-          else
-            echo "=========================================================="
-            echo "RUNNING DAILY SCRIPT (Rolling past days -> $TARGET_DIR)"
-            echo "File Structure:    $MERGE_OPT"
-            echo "=========================================================="
-            export TARGET_FOLDER_PATH="$TARGET_DIR"
-            export MERGE_OPTION="$MERGE_OPT"
-            python main.py
-          fi
+          echo "=========================================================="
+          echo "RUNNING SHAREPOINT ARCHIVER & FILE MOVER"
+          echo "=========================================================="
+          python archive_files.py \
+            --source "${{ inputs.source_folder || 'Odoo_aug_sep' }}" \
+            --dest-root "${{ inputs.archive_root || 'Odoo_aug_sep/oct_test' }}"
