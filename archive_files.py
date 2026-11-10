@@ -197,23 +197,6 @@ def detect_target_subfolder(filename: str, existing_subfolders: List[str]) -> st
     return riyadh_now.strftime("%d-%b-%Y")
 
 
-def resolve_destination_path(archive_root: str, target_subfolder: str) -> str:
-    """
-    Computes the full destination folder path.
-    If archive_root already is the target folder (e.g. ends with 'oct_test' matching month 'Oct'),
-    it places files directly into archive_root without creating a redundant nested subfolder.
-    Otherwise, appends /{target_subfolder}.
-    """
-    root_clean = archive_root.strip("/")
-    last_seg = root_clean.split("/")[-1].lower()
-    sub_lower = target_subfolder.lower()
-
-    if sub_lower in last_seg or last_seg.startswith(sub_lower):
-        return root_clean
-
-    return f"{root_clean}/{target_subfolder}"
-
-
 def move_item_atomic(
     site_id: str,
     headers: dict,
@@ -347,7 +330,7 @@ def archive_validated_docs(
     for item in candidate_files:
         filename = item["name"]
         target_subfolder = detect_target_subfolder(filename, existing_subfolders)
-        full_dest_path = resolve_destination_path(archive_root, target_subfolder)
+        full_dest_path = f"{archive_root.strip('/')}/{target_subfolder}"
         moves_planned.append({
             "id": item["id"],
             "name": filename,
