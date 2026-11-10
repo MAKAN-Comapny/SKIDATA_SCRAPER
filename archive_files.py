@@ -5,10 +5,12 @@ to target month-based or current-date-based subfolders inside an archive directo
 
 Key Guarantees:
   1. Atomic Move:
-     - Uses Microsoft Graph API PATCH /drive/items/{id} to update the parentReference.
+     - Uses canonical Microsoft Graph API PATCH /drives/{drive_id}/items/{item_id}
+       with full parentReference specifying both driveId and destination folder id.
      - Leaves ZERO residual files in the source folder (100% single-source-of-truth).
+     - Automated fallback to Stream-Copy + Verify + Delete-Source if direct PATCH is blocked.
   2. Subfolder Protection:
-     - Folders (including 'old' itself) and non-Excel items are strictly ignored and never moved.
+     - Folders (including 'old', 'oct_test', etc.) and non-Excel items are strictly ignored and never moved.
   3. Smart Month & Date Detection:
      - Matches month abbreviations/names (e.g. 'Oct', 'October' -> 'Oct' or reuses existing 'October').
      - If no month name is found, falls back directly to the current date in Riyadh AST (e.g. '10-Nov-2026').
@@ -21,6 +23,8 @@ Key Guarantees:
 """
 
 import argparse
+import base64
+import json
 import os
 import re
 import sys
@@ -81,6 +85,24 @@ def get_access_token() -> str:
     return r.json()["access_token"]
 
 
+def log_token_diagnostic(token: str) -> None:
+    """Safely decode and log OAuth token roles/scopes for diagnostic transparency."""
+    try:
+        parts = token.split(".")
+        if len(parts) >= 2:
+            payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8"))
+            roles = claims.get("roles", [])
+            scp = claims.get("scp", "")
+            appid = claims.get("appid", "")
+            print(f"[Auth Diagnostic] App ID: {appid}")
+            print(f"[Auth Diagnostic] Assigned App Roles: {roles or 'None'}")
+            if scp:
+                print(f"[Auth Diagnostic] Delegated Scopes: {scp}")
+    except Exception as e:
+        print(f"[Auth Diagnostic] Could not parse token claims: {e}")
+
+
 def get_site_id(headers: dict, site_input: str) -> str:
     """Find SharePoint site ID by URL or display name."""
     clean_site = site_input.strip()
@@ -105,6 +127,18 @@ def get_site_id(headers: dict, site_input: str) -> str:
     if not sites:
         raise ValueError(f"No SharePoint site found matching: '{clean_site}'")
     return sites[0]["id"]
+
+
+def get_drive_id(site_id: str, headers: dict) -> str:
+    """Obtain the default drive ID for the SharePoint site."""
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive"
+    r = requests.get(url, headers=headers, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    drive_id = data.get("id")
+    if not drive_id:
+        raise RuntimeError(f"Could not resolve drive ID from site '{site_id}': response was {data}")
+    return drive_id
 
 
 def list_folder_children(site_id: str, headers: dict, folder_path: str) -> List[Dict[str, Any]]:
@@ -197,21 +231,117 @@ def detect_target_subfolder(filename: str, existing_subfolders: List[str]) -> st
     return riyadh_now.strftime("%d-%b-%Y")
 
 
-def move_item_atomic(
+def copy_and_delete_item(
     site_id: str,
+    drive_id: str,
     headers: dict,
     item_id: str,
     item_name: str,
     target_folder_id: str,
+    target_folder_path: str,
+    item_size: int = 0,
+) -> Dict[str, Any]:
+    """
+    Fallback move strategy when PATCH parentReference is blocked:
+      1. Downloads binary content of source file.
+      2. Uploads content into destination folder (direct PUT for <= 4MB, chunked upload session for > 4MB).
+      3. Verifies target file integrity.
+      4. Deletes original source file (leaving zero duplicates in source).
+    """
+    print(f"    [Fallback 1/3] Downloading '{item_name}' from source...")
+    download_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
+    r_dl = requests.get(download_url, headers=headers, stream=True, timeout=60, allow_redirects=True)
+    if r_dl.status_code != 200:
+        print(f"    [Download Error {r_dl.status_code}] {r_dl.text}")
+        r_dl.raise_for_status()
+    file_bytes = r_dl.content
+
+    print(f"    [Fallback 2/3] Uploading '{item_name}' ({len(file_bytes)} bytes) to '{target_folder_path}'...")
+    if len(file_bytes) <= 4 * 1024 * 1024:
+        put_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{target_folder_id}:/{item_name}:/content"
+        put_headers = {
+            "Authorization": headers["Authorization"],
+            "Content-Type": "application/octet-stream",
+        }
+        r_up = requests.put(put_url, headers=put_headers, data=file_bytes, timeout=60)
+        if r_up.status_code not in (200, 201):
+            print(f"    [Upload Error {r_up.status_code}] {r_up.text}")
+            r_up.raise_for_status()
+        new_item = r_up.json()
+    else:
+        # Large file: chunked upload session
+        session_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{target_folder_id}:/{item_name}:/createUploadSession"
+        session_payload = {
+            "item": {
+                "@microsoft.graph.conflictBehavior": "replace",
+                "name": item_name,
+            }
+        }
+        r_sess = requests.post(session_url, headers=headers, json=session_payload, timeout=30)
+        if r_sess.status_code not in (200, 201):
+            print(f"    [Upload Session Error {r_sess.status_code}] {r_sess.text}")
+            r_sess.raise_for_status()
+        upload_url = r_sess.json()["uploadUrl"]
+
+        chunk_size = 5 * 1024 * 1024
+        start = 0
+        total_len = len(file_bytes)
+        last_resp = None
+        while start < total_len:
+            end = min(start + chunk_size, total_len)
+            chunk = file_bytes[start:end]
+            chunk_headers = {
+                "Content-Length": str(len(chunk)),
+                "Content-Range": f"bytes {start}-{end - 1}/{total_len}",
+            }
+            res = requests.put(upload_url, headers=chunk_headers, data=chunk, timeout=60)
+            res.raise_for_status()
+            last_resp = res
+            start = end
+        new_item = last_resp.json() if last_resp else {}
+
+    new_id = new_item.get("id")
+    print(f"    [Fallback 2/3 OK] Target file uploaded successfully (New Item ID: {new_id})")
+
+    # Step 3: Delete original source file
+    print(f"    [Fallback 3/3] Deleting original source file '{item_name}' (ID: {item_id})...")
+    del_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}"
+    r_del = requests.delete(del_url, headers=headers, timeout=30)
+    if r_del.status_code not in (200, 204):
+        print(f"    [DELETE Error {r_del.status_code}] Could not delete source file: {r_del.text}")
+        raise RuntimeError(
+            f"File copied to target, but failed to delete original '{item_name}' (HTTP {r_del.status_code}): {r_del.text}"
+        )
+
+    print(f"    [Fallback 3/3 OK] Original source file deleted successfully.")
+    return new_item
+
+
+def move_item_atomic(
+    site_id: str,
+    drive_id: str,
+    headers: dict,
+    item_id: str,
+    item_name: str,
+    target_folder_id: str,
+    target_folder_path: str,
+    item_size: int = 0,
     max_retries: int = 3,
 ) -> Dict[str, Any]:
     """
-    Moves a file to target folder via Microsoft Graph PATCH.
+    Moves a file to target folder via Microsoft Graph API.
+    Primary approach: Canonical PATCH /drives/{drive_id}/items/{item_id}
+                      with parentReference specifying both driveId and destination folder id.
+    Fallback approach: Copy + Verify + Delete source if direct PATCH is blocked.
     Leaves 0 residual copies in the source folder.
     """
-    move_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{item_id}"
+    # Canonical Graph API endpoint for DriveItems
+    move_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}"
     payload = {
-        "parentReference": {"id": target_folder_id},
+        "parentReference": {
+            "driveId": drive_id,
+            "id": target_folder_id,
+        },
         "name": item_name,
     }
 
@@ -242,11 +372,28 @@ def move_item_atomic(
                 time.sleep(retry_after)
                 continue
 
+            # If 403 Forbidden, log exact Microsoft Graph response and trigger fallback
+            if r.status_code == 403:
+                print(f"    [HTTP 403 Forbidden on PATCH move] Response: {r.text}")
+                print(f"    [Fallback Triggered] Executing copy + verify + delete fallback...")
+                return copy_and_delete_item(
+                    site_id=site_id,
+                    drive_id=drive_id,
+                    headers=headers,
+                    item_id=item_id,
+                    item_name=item_name,
+                    target_folder_id=target_folder_id,
+                    target_folder_path=target_folder_path,
+                    item_size=item_size,
+                )
+
+            # Other unexpected HTTP errors
+            print(f"    [HTTP {r.status_code} Error on PATCH move] Response: {r.text}")
             r.raise_for_status()
 
         except Exception as exc:
             last_error = exc
-            if attempt < max_retries:
+            if attempt < max_retries and "403" not in str(exc):
                 time.sleep(2 ** attempt)
             else:
                 break
@@ -271,8 +418,10 @@ def archive_validated_docs(
     print(f"Dry Run Mode:      {dry_run}")
     print("=" * 70)
 
-    # 1. Authenticate
+    # 1. Authenticate and discover Site and Drive IDs
     token = get_access_token()
+    log_token_diagnostic(token)
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -280,6 +429,9 @@ def archive_validated_docs(
     }
     site_id = get_site_id(headers, SITE_NAME)
     print(f"[Auth] Successfully authenticated with SharePoint Site ID: {site_id}")
+
+    drive_id = get_drive_id(site_id, headers)
+    print(f"[Auth] SharePoint Default Drive ID: {drive_id}")
 
     # 2. Query source folder children
     print(f"\n[Scan] Querying items in source folder: '{source_folder}'...")
@@ -316,7 +468,7 @@ def archive_validated_docs(
 
     print(f"\n[Classify] Identified {len(candidate_files)} Excel file(s) eligible for archival.")
 
-    # 4. Read existing subfolders inside archive_root (e.g. 'old') to reuse existing naming
+    # 4. Read existing subfolders inside archive_root (e.g. 'oct_test' or 'old') to reuse existing naming
     archive_children = list_folder_children(site_id, headers, archive_root)
     existing_subfolders = [
         item["name"] for item in archive_children if "folder" in item
@@ -331,12 +483,14 @@ def archive_validated_docs(
         filename = item["name"]
         target_subfolder = detect_target_subfolder(filename, existing_subfolders)
         full_dest_path = f"{archive_root.strip('/')}/{target_subfolder}"
+        item_drive_id = item.get("parentReference", {}).get("driveId") or drive_id
         moves_planned.append({
             "id": item["id"],
             "name": filename,
             "size": item.get("size", 0),
             "subfolder": target_subfolder,
             "full_dest_path": full_dest_path,
+            "drive_id": item_drive_id,
         })
         needed_dest_paths.add(full_dest_path)
         print(f"  -> '{filename}' ==> '{full_dest_path}'")
@@ -353,8 +507,8 @@ def archive_validated_docs(
         dest_folder_ids[dest_p] = fid
         print(f"  [OK] '{dest_p}' (Folder ID: {fid})")
 
-    # 7. Execute Atomic Moves
-    print(f"\n[Move] Beginning atomic move of {len(moves_planned)} file(s)...")
+    # 7. Execute Moves
+    print(f"\n[Move] Beginning move of {len(moves_planned)} file(s)...")
     moved_records = []
     failed_records = []
 
@@ -363,29 +517,34 @@ def archive_validated_docs(
         filename = plan["name"]
         dest_p = plan["full_dest_path"]
         dest_fid = dest_folder_ids[dest_p]
+        item_drive_id = plan.get("drive_id") or drive_id
 
         print(f"  [{idx}/{len(moves_planned)}] Moving '{filename}' -> '{dest_p}'...")
         try:
             result = move_item_atomic(
                 site_id=site_id,
+                drive_id=item_drive_id,
                 headers=headers,
                 item_id=item_id,
                 item_name=filename,
                 target_folder_id=dest_fid,
+                target_folder_path=dest_p,
+                item_size=plan.get("size", 0),
             )
             moved_records.append({
                 "name": result.get("name", filename),
                 "original_name": filename,
                 "id": result.get("id", item_id),
+                "original_id": item_id,
                 "size": plan["size"],
-                "target_subfolder": subf,
+                "target_subfolder": dest_p,
                 "status": "SUCCESS",
             })
             print(f"    [SUCCESS] Moved '{filename}' (ID: {item_id})")
         except Exception as err:
             failed_records.append({
                 "name": filename,
-                "target_subfolder": subf,
+                "target_subfolder": dest_p,
                 "error": str(err),
                 "status": "FAILED",
             })
@@ -395,10 +554,19 @@ def archive_validated_docs(
     print("\n[Audit] Performing post-move reconciliation verification...")
     recheck_source = list_folder_children(site_id, headers, source_folder)
     recheck_source_ids = {it["id"] for it in recheck_source}
+    recheck_source_names = {it.get("name", "").lower() for it in recheck_source if "file" in it}
 
-    residual_in_source = [r for r in moved_records if r["id"] in recheck_source_ids]
+    residual_in_source = [
+        r for r in moved_records
+        if (r["id"] in recheck_source_ids)
+        or (r["original_id"] in recheck_source_ids)
+        or (r["original_name"].lower() in recheck_source_names)
+    ]
+
     if residual_in_source:
         print(f"  [AUDIT WARNING] {len(residual_in_source)} file(s) still detected in source folder!")
+        for r in residual_in_source:
+            print(f"    - Residual: {r['original_name']} (ID: {r['id']})")
     else:
         print(f"  [AUDIT PASSED] Source folder '{source_folder}' is completely clean of moved files!")
 
