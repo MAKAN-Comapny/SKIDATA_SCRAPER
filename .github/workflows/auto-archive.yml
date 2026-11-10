@@ -1,0 +1,61 @@
+name: Automatic SharePoint File Archival
+
+on:
+  schedule:
+    # Everyday at 16:00 UTC = 19:00 (7:00 PM) Riyadh / Saudi Time (AST)
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+    # Allows manual execution anytime with custom inputs
+    inputs:
+      source_folder:
+        description: "Source SharePoint folder containing active Excel exports"
+        required: false
+        default: "Validated_Docs"
+      archive_root:
+        description: "Target SharePoint archive directory (e.g., Validated_Docs/old)"
+        required: false
+        default: "Validated_Docs/old"
+      dry_run:
+        description: "Dry run mode (scan & classify only, do not move files)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: auto-archive-sharepoint
+  cancel-in-progress: false
+
+jobs:
+  archive-files:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests python-dotenv
+
+      - name: Run SharePoint File Archiver
+        env:
+          TENANT_ID: ${{ secrets.TENANT_ID }}
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          SHAREPOINT_SITE_NAME: ${{ secrets.SHAREPOINT_SITE_NAME }}
+        run: |
+          EXTRA_ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            EXTRA_ARGS="--dry-run"
+          fi
+          python archive_files.py \
+            --source "${{ inputs.source_folder || 'Validated_Docs' }}" \
+            --dest-root "${{ inputs.archive_root || 'Validated_Docs/old' }}" \
+            $EXTRA_ARGS
