@@ -496,6 +496,51 @@ class TestValidationGateTiers(unittest.TestCase):
             meta_b = clean_backfill_directory(src_b, dst_b, strict=True)
             self.assertNotIn("07-Oct-26-Revenue-In-Depth.xlsx", meta_b["revenue_pre_clean_totals"])
 
+    def test_to_sharepoint_backfill_uploads_only_xlsx_and_skips_json(self):
+        import To_Sharepoint_backfill
+
+        with tempfile.TemporaryDirectory() as tmp:
+            xlsx_a = os.path.join(tmp, "07-Oct-26-Parking-Transactions.xlsx")
+            xlsx_b = os.path.join(tmp, "07-Oct-26-Revenue-In-Depth.xlsx")
+            report_json = os.path.join(tmp, "_validation_report.json")
+            meta_json = os.path.join(tmp, "_clean_meta.json")
+            for p in (xlsx_a, xlsx_b):
+                with open(p, "wb") as fh:
+                    fh.write(b"PK\x03\x04dummy-xlsx")
+            with open(report_json, "w", encoding="utf-8") as fh:
+                json.dump({"status": "passed"}, fh)
+            with open(meta_json, "w", encoding="utf-8") as fh:
+                json.dump({"staged_files": []}, fh)
+
+            uploaded_paths = []
+            with patch.object(To_Sharepoint_backfill, "TENANT_ID", "t"), \
+                 patch.object(To_Sharepoint_backfill, "CLIENT_ID", "c"), \
+                 patch.object(To_Sharepoint_backfill, "CLIENT_SECRET", "s"), \
+                 patch.object(To_Sharepoint_backfill, "SITE_NAME", "site"), \
+                 patch.object(To_Sharepoint_backfill, "get_access_token", return_value="tok"), \
+                 patch.object(To_Sharepoint_backfill, "get_site_id", return_value="site-1"), \
+                 patch.object(To_Sharepoint_backfill, "ensure_folder_path"), \
+                 patch.object(
+                     To_Sharepoint_backfill,
+                     "upload_file",
+                     side_effect=lambda _s, _h, fp, _t: uploaded_paths.append(os.path.basename(fp)) or {},
+                 ):
+                To_Sharepoint_backfill.main(target_folder="Validated_Docs/old/Oct", source_dir=tmp)
+
+            self.assertEqual(
+                sorted(uploaded_paths),
+                ["07-Oct-26-Parking-Transactions.xlsx", "07-Oct-26-Revenue-In-Depth.xlsx"],
+            )
+            self.assertNotIn("_validation_report.json", uploaded_paths)
+            self.assertNotIn("_clean_meta.json", uploaded_paths)
+
+        client = TestClient(portal_server.app)
+        res_html = client.get("/")
+        self.assertEqual(res_html.status_code, 200)
+        self.assertIn("valDownloadJsonBtn", res_html.text)
+        self.assertIn("valAuditMetaBar", res_html.text)
+        self.assertIn("Audit Report Kept in UI", res_html.text)
+
 
 if __name__ == "__main__":
     unittest.main()
