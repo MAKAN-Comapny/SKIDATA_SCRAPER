@@ -9,6 +9,7 @@
   <link rel="shortcut icon" href="./favicon.png?v=2">
   <link rel="apple-touch-icon" sizes="256x256" href="./favicon.png?v=2">
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <link rel="stylesheet" href="./style.css">
   <script>
@@ -631,6 +632,133 @@
                 <span><i class="fa-solid fa-file-code text-brand-400 mr-1.5"></i>Validation Audit Report (_validation_report.json &mdash; UI only, SharePoint stays Excel-only)</span>
               </div>
               <pre id="valJsonPre" class="max-h-64 overflow-auto p-3 text-[11px] text-cyan-300 font-mono leading-relaxed"></pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- Fetched Data Insights Graphs (Dynamic: Single Day / Date Range / Multi-Month) -->
+        <div id="dataInsightsSection" class="p-4 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-4">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div class="flex items-center gap-2.5">
+              <span class="w-7 h-7 rounded-lg bg-sky-500/15 text-sky-400 flex items-center justify-center text-xs">
+                <i class="fa-solid fa-chart-line"></i>
+              </span>
+              <div>
+                <div class="text-xs font-bold text-white flex items-center gap-2 flex-wrap">
+                  <span>Fetched Data Insights</span>
+                  <span id="insightsScopeBadge" class="text-[10px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 font-mono">
+                    Awaiting Fetch
+                  </span>
+                </div>
+                <p id="insightsSubtitle" class="text-[11px] text-slate-400 mt-0.5">
+                  Dynamic revenue, barrier traffic, car park share &amp; payment mix analytics across day, range, or month fetches.
+                </p>
+              </div>
+            </div>
+
+            <div id="insightViewTabs" class="hidden inline-flex items-center gap-1 p-1 rounded-xl bg-slate-900 border border-slate-800 shrink-0">
+              <button type="button" data-insight-view="daily" class="insight-view-tab px-2.5 py-1 rounded-lg text-[11px] font-medium text-slate-400 hover:text-white transition">
+                Daily Trend
+              </button>
+              <button type="button" data-insight-view="monthly" class="insight-view-tab px-2.5 py-1 rounded-lg text-[11px] font-medium text-slate-400 hover:text-white transition">
+                Monthly Rollup
+              </button>
+              <button type="button" data-insight-view="hourly" class="insight-view-tab px-2.5 py-1 rounded-lg text-[11px] font-medium text-slate-400 hover:text-white transition">
+                Hourly Peak
+              </button>
+            </div>
+          </div>
+
+          <div id="insightsEmptyState" class="px-3.5 py-3 rounded-lg bg-slate-900/60 border border-slate-800/80 text-[11px] text-slate-400 flex items-center gap-2">
+            <i class="fa-solid fa-chart-column text-slate-500"></i>
+            <span id="insightsEmptyMsg">Run a Day, Date Range, or Month extraction with Validation Gate enabled to visualize fetched insights.</span>
+          </div>
+
+          <div id="insightsDashboardBody" class="hidden space-y-4">
+            <!-- 4 Executive KPI Tiles -->
+            <div id="insightKpiRow" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 text-xs">
+              <div class="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1">
+                <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold flex items-center justify-between">
+                  <span>Financial Volume</span><i class="fa-solid fa-coins text-emerald-400"></i>
+                </div>
+                <div id="insKpiRevMain" class="text-base font-bold text-white font-mono">-</div>
+                <div id="insKpiRevSub" class="text-[10px] text-slate-400 font-mono truncate">-</div>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1">
+                <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold flex items-center justify-between">
+                  <span>Parking Sessions</span><i class="fa-solid fa-ticket text-sky-400"></i>
+                </div>
+                <div id="insKpiRowsMain" class="text-base font-bold text-white font-mono">-</div>
+                <div id="insKpiRowsSub" class="text-[10px] text-slate-400 font-mono truncate">-</div>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1">
+                <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold flex items-center justify-between">
+                  <span>Gate Flow &amp; Peak</span><i class="fa-solid fa-road text-indigo-400"></i>
+                </div>
+                <div id="insKpiPeakMain" class="text-base font-bold text-white font-mono">-</div>
+                <div id="insKpiPeakSub" class="text-[10px] text-slate-400 font-mono truncate">-</div>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1">
+                <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold flex items-center justify-between">
+                  <span>Top Car Park</span><i class="fa-solid fa-ranking-star text-amber-400"></i>
+                </div>
+                <div id="insKpiTopCpMain" class="text-base font-bold text-white truncate">-</div>
+                <div id="insKpiTopCpSub" class="text-[10px] text-slate-400 font-mono truncate">-</div>
+              </div>
+            </div>
+
+            <!-- Interactive Chart Grid -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              <!-- Time Series Chart (spans 2 columns on desktop) -->
+              <div class="lg:col-span-2 p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2.5">
+                <div class="flex items-center justify-between gap-2">
+                  <div>
+                    <h4 id="insTimeChartTitle" class="text-xs font-bold text-slate-200">Revenue vs Payment &amp; Traffic Trend</h4>
+                    <p id="insTimeChartHint" class="text-[10px] text-slate-500">Bars: Gross Revenue &amp; PT Payment (SAR) &middot; Line: Parking Volume</p>
+                  </div>
+                </div>
+                <div id="insTimeChartBox" class="h-64 relative">
+                  <canvas id="insightTimeChart"></canvas>
+                </div>
+              </div>
+
+              <!-- Payment Mix + Paid vs Free -->
+              <div class="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2.5 flex flex-col justify-between">
+                <div class="flex items-center justify-between gap-2">
+                  <div>
+                    <h4 class="text-xs font-bold text-slate-200">Payment Method Mix</h4>
+                    <p class="text-[10px] text-slate-500">Paid share by Tender Type</p>
+                  </div>
+                  <span id="insPaidRatioPill" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono">
+                    -
+                  </span>
+                </div>
+                <div id="insMixChartBox" class="h-44 relative">
+                  <canvas id="insightMixChart"></canvas>
+                </div>
+                <ul id="insMixLegendList" class="space-y-1 text-[10px] font-mono text-slate-300"></ul>
+              </div>
+
+              <!-- Car Park Breakdown (Full Width Row) -->
+              <div class="lg:col-span-3 p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2.5">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h4 id="insCpChartTitle" class="text-xs font-bold text-slate-200">Performance by Car Park</h4>
+                    <p id="insCpChartHint" class="text-[10px] text-slate-500">Compare Revenue-In-Depth Gross Revenue vs Parking-Transactions Payment across locations</p>
+                  </div>
+                  <div id="insightCpMetricTabs" class="inline-flex items-center gap-1 p-1 rounded-lg bg-slate-950 border border-slate-800 shrink-0">
+                    <button type="button" data-cp-metric="financial" class="insight-cp-tab px-2.5 py-0.5 rounded text-[10px] font-medium bg-brand-600/30 text-brand-300 border border-brand-500/40 transition">
+                      Revenue vs Pay (SAR)
+                    </button>
+                    <button type="button" data-cp-metric="traffic" class="insight-cp-tab px-2.5 py-0.5 rounded text-[10px] font-medium text-slate-400 hover:text-white transition">
+                      Traffic &amp; Gate Entries
+                    </button>
+                  </div>
+                </div>
+                <div id="insCpChartBox" class="h-60 relative">
+                  <canvas id="insightCarParkChart"></canvas>
+                </div>
+              </div>
             </div>
           </div>
         </div>

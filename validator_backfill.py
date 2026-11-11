@@ -203,8 +203,59 @@ def _date_range_list(start_d: Optional[date], end_d: Optional[date]) -> list[str
     return [(start_d + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days)]
 
 
+def _parse_hour_bucket(val: Any) -> Optional[str]:
+    """Normalize Qlik Hour values (`9`, `'14'`, `'14:00'`, `'02:00 PM'`) into `'00'`..`'23'`."""
+    if val is None:
+        return None
+    text = str(val).strip()
+    if not text or text == "-":
+        return None
+    num = _try_float(text)
+    if num is not None and 0 <= int(num) <= 23 and ":" not in text:
+        return f"{int(num):02d}"
+    for fmt in ("%H:%M:%S", "%H:%M", "%I:%M %p", "%I %p"):
+        try:
+            return f"{datetime.strptime(text.upper(), fmt).hour:02d}"
+        except ValueError:
+            continue
+    return None
+
+
+def _accumulate_bucket(store: dict[str, dict[str, float]], key: Optional[str], **deltas: float) -> None:
+    """Increment numeric fields inside a string-keyed aggregation bucket."""
+    if not key:
+        return
+    bucket = store.setdefault(key, {})
+    for field, val in deltas.items():
+        if val:
+            bucket[field] = bucket.get(field, 0.0) + float(val)
+
+
+def _merge_bucket_map(dest: dict[str, dict[str, float]], src: Optional[dict[str, dict[str, float]]]) -> None:
+    """Merge all numeric buckets from `src` into `dest`."""
+    if not src:
+        return
+    for key, vals in src.items():
+        _accumulate_bucket(dest, key, **vals)
+
+
+_PAYMENT_METHOD_CANONICAL = {
+    "surepay": "SurePay",
+    "cash": "Cash",
+    "other credit card": "Other Credit Card",
+}
+
+
+def _normalize_payment_method(raw_method: str) -> str:
+    """Normalize Qlik tender capitalization glitches (e.g. `SurePAy` vs `SurePay`)."""
+    cleaned = (raw_method or "").strip()
+    if not cleaned or cleaned in ("-", "N/A"):
+        return "Other / Unspecified"
+    return _PAYMENT_METHOD_CANONICAL.get(cleaned.lower(), cleaned)
+
+
 def _validate_indepth_workbook(file_path: str, file_type: str) -> dict[str, Any]:
-    """Validate Access-In-Depth, Revenue-In-Depth, or System-Event-In-Depth workbook."""
+    """Validate Access-In-Depth, Revenue-In-Depth, or System-Event-In-Depth workbook and collect insight aggregates."""
     result: dict[str, Any] = {
         "readable": False,
         "error": None,
@@ -215,6 +266,9 @@ def _validate_indepth_workbook(file_path: str, file_type: str) -> dict[str, Any]
         "dates": set(),
         "active_dates": set(),
         "revenue_totals": {"quantity": 0.0, "theoretical": 0.0, "gross": 0.0},
+        "by_date": {},
+        "by_hour": {},
+        "by_car_park": {},
     }
     if not os.path.exists(file_path):
         result["error"] = "File missing"
@@ -229,6 +283,7 @@ def _validate_indepth_workbook(file_path: str, file_type: str) -> dict[str, Any]
             headers: list[str] = []
             idx_map: dict[str, int] = {}
             is_rev = file_type == "Revenue-In-Depth"
+            is_access = file_type == "Access-In-Depth"
 
             with archive.open(sheet_path) as handle:
                 row_num = 0
@@ -262,6 +317,13 @@ def _validate_indepth_workbook(file_path: str, file_type: str) -> dict[str, Any]
                             row_date_iso = parsed_d.strftime("%Y-%m-%d")
                             result["dates"].add(row_date_iso)
 
+                    cp_idx = idx_map.get("Car Park")
+                    cp_name = cells[cp_idx][1].strip() if (cp_idx is not None and cp_idx in cells) else ""
+                    if cp_name in ("-", "N/A"):
+                        cp_name = ""
+                    hr_idx = idx_map.get("Hour")
+                    hr_key = _parse_hour_bucket(cells[hr_idx][1]) if (hr_idx is not None and hr_idx in cells) else None
+
                     if is_rev:
                         iq = idx_map.get("Quantity")
                         it = idx_map.get("Theoretical Revenue")
@@ -270,11 +332,26 @@ def _validate_indepth_workbook(file_path: str, file_type: str) -> dict[str, Any]
                         t_val = _try_float(cells[it][1]) if (it is not None and it in cells) else 0.0
                         g_val = _try_float(cells[ig][1]) if (ig is not None and ig in cells) else 0.0
                         q_num = q_val or 0.0
+                        t_num = t_val or 0.0
+                        g_num = g_val or 0.0
                         result["revenue_totals"]["quantity"] += q_num
-                        result["revenue_totals"]["theoretical"] += t_val or 0.0
-                        result["revenue_totals"]["gross"] += g_val or 0.0
+                        result["revenue_totals"]["theoretical"] += t_num
+                        result["revenue_totals"]["gross"] += g_num
                         if row_date_iso and q_num > 0:
                             result["active_dates"].add(row_date_iso)
+                        _accumulate_bucket(result["by_date"], row_date_iso, revenue_gross=g_num, revenue_theoretical=t_num, revenue_qty=q_num)
+                        _accumulate_bucket(result["by_hour"], hr_key, revenue_gross=g_num)
+                        _accumulate_bucket(result["by_car_park"], cp_name, revenue_gross=g_num, revenue_theoretical=t_num, revenue_qty=q_num)
+                    elif is_access:
+                        if row_date_iso:
+                            result["active_dates"].add(row_date_iso)
+                        ie = idx_map.get("Entry Count")
+                        ix = idx_map.get("Exit Count")
+                        en_num = (_try_float(cells[ie][1]) if (ie is not None and ie in cells) else 0.0) or 0.0
+                        ex_num = (_try_float(cells[ix][1]) if (ix is not None and ix in cells) else 0.0) or 0.0
+                        _accumulate_bucket(result["by_date"], row_date_iso, access_entries=en_num, access_exits=ex_num)
+                        _accumulate_bucket(result["by_hour"], hr_key, access_entries=en_num)
+                        _accumulate_bucket(result["by_car_park"], cp_name, access_entries=en_num, access_exits=ex_num)
                     elif row_date_iso:
                         result["active_dates"].add(row_date_iso)
 
@@ -314,6 +391,12 @@ def _validate_parking_workbook(
         "out_of_range_txn_dates": [],
         "duplicate_access_ids": [],
         "duplicate_count": 0,
+        "by_date": {},
+        "by_hour": {},
+        "by_car_park": {},
+        "payment_methods": {},
+        "paid_rows": 0,
+        "free_rows": 0,
     }
     if not os.path.exists(file_path):
         res["error"] = "File missing"
@@ -455,6 +538,8 @@ def _validate_parking_workbook(
                                 )
 
                     # 4. Numeric Payment / Discount Amount / Access ID
+                    row_pay = 0.0
+                    row_disc = 0.0
                     for col_i, col_name in num_cols:
                         cell = cells.get(col_i)
                         if cell is None:
@@ -473,8 +558,10 @@ def _validate_parking_workbook(
                         else:
                             if col_name == "Payment":
                                 res["payment_sum"] += num_val
+                                row_pay += num_val
                             elif col_name == "Discount Amount":
                                 res["discount_sum"] += num_val
+                                row_disc += num_val
 
                     # 5. Track 'N/A' vs null for Customer Name / User Full Name
                     for col_name, stats in na_cols.items():
@@ -488,7 +575,7 @@ def _validate_parking_workbook(
                         else:
                             stats["other"] += 1
 
-                    # 6. Coverage date & timestamp checks
+                    # 6. Coverage date & timestamp checks + Insights aggregation
                     txn_dt = parsed_dates.get("Transaction Date/Time") or parsed_dates.get("Exit Date/Time")
                     if txn_dt is not None:
                         txn_d = txn_dt.date()
@@ -506,6 +593,52 @@ def _validate_parking_workbook(
                             res["inverted_exit_lt_entry"].append(acc_display)
                         else:
                             res["inverted_exit_lt_entry"].append("__more__")
+
+                    is_paid = 1 if row_pay > 0 else 0
+                    if is_paid:
+                        res["paid_rows"] += 1
+                    else:
+                        res["free_rows"] += 1
+
+                    insight_dt = txn_dt or ex_dt or en_dt
+                    if insight_dt is not None:
+                        _accumulate_bucket(
+                            res["by_date"],
+                            insight_dt.strftime("%Y-%m-%d"),
+                            parking_rows=1,
+                            paid_rows=is_paid,
+                            parking_payment=row_pay,
+                            parking_discount=row_disc,
+                        )
+                        _accumulate_bucket(
+                            res["by_hour"],
+                            f"{insight_dt.hour:02d}",
+                            parking_rows=1,
+                            paid_rows=is_paid,
+                            parking_payment=row_pay,
+                        )
+
+                    cp_idx = idx_map.get("Car Park")
+                    cp_val = cells[cp_idx][1].strip() if (cp_idx is not None and cp_idx in cells) else ""
+                    if cp_val and cp_val not in ("-", "N/A"):
+                        _accumulate_bucket(
+                            res["by_car_park"],
+                            cp_val,
+                            parking_rows=1,
+                            paid_rows=is_paid,
+                            parking_payment=row_pay,
+                            parking_discount=row_disc,
+                        )
+
+                    if is_paid:
+                        pt_idx = idx_map.get("Payment Type")
+                        raw_ptype = cells[pt_idx][1] if (pt_idx is not None and pt_idx in cells) else ""
+                        _accumulate_bucket(
+                            res["payment_methods"],
+                            _normalize_payment_method(raw_ptype),
+                            count=1,
+                            amount=row_pay,
+                        )
 
                     # 7. Composite duplicate tracking
                     ser_idx = idx_map.get("Serial Number")
@@ -1151,6 +1284,15 @@ def validate_backfill_run(
                 "out_of_range_sample_ids": oor_sample[:15],
             },
         },
+        "insights": _build_insights_payload(
+            expected_dates=expected_dates,
+            indepth_results=indepth_results,
+            pt_info=pt_info,
+            rev_theo=rev_theo,
+            rev_gross=rev_gross,
+            pt_payment=pt_payment,
+            pt_discount=pt_discount,
+        ),
         "hard_failures": hard_failures,
         "soft_warnings": soft_warnings,
     }
@@ -1177,6 +1319,331 @@ def _merge_check_bool(reports: list[dict[str, Any]], field: str) -> bool:
     return all(
         (r.get("checks") or {}).get("structure_and_types", {}).get(field, True)
         for r in reports
+    )
+
+
+def _compile_insights(
+    by_date: dict[str, dict[str, float]],
+    by_hour: dict[str, dict[str, float]],
+    by_car_park: dict[str, dict[str, float]],
+    payment_methods: dict[str, dict[str, float]],
+    paid_rows: int,
+    free_rows: int,
+    total_discount: float,
+    rev_theo: float,
+    rev_gross: float,
+    pt_payment: float,
+    batches_series: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Compile pre-aggregated daily, monthly, hourly, car-park, and payment insights."""
+    daily_series: list[dict[str, Any]] = []
+    monthly_acc: dict[str, dict[str, float]] = {}
+    access_entries_total = 0
+    access_exits_total = 0
+
+    for d_key in sorted(by_date.keys()):
+        b = by_date[d_key]
+        en = int(round(b.get("access_entries", 0.0)))
+        ex = int(round(b.get("access_exits", 0.0)))
+        access_entries_total += en
+        access_exits_total += ex
+        entry = {
+            "date": d_key,
+            "revenue_gross": round(b.get("revenue_gross", 0.0), 2),
+            "revenue_theoretical": round(b.get("revenue_theoretical", 0.0), 2),
+            "parking_payment": round(b.get("parking_payment", 0.0), 2),
+            "parking_discount": round(b.get("parking_discount", 0.0), 2),
+            "parking_rows": int(round(b.get("parking_rows", 0.0))),
+            "paid_rows": int(round(b.get("paid_rows", 0.0))),
+            "access_entries": en,
+            "access_exits": ex,
+        }
+        daily_series.append(entry)
+        _accumulate_bucket(
+            monthly_acc,
+            d_key[:7],
+            revenue_gross=entry["revenue_gross"],
+            revenue_theoretical=entry["revenue_theoretical"],
+            parking_payment=entry["parking_payment"],
+            parking_discount=entry["parking_discount"],
+            parking_rows=entry["parking_rows"],
+            paid_rows=entry["paid_rows"],
+            access_entries=en,
+            access_exits=ex,
+        )
+
+    monthly_series = [
+        {
+            "month": m_key,
+            "revenue_gross": round(b.get("revenue_gross", 0.0), 2),
+            "revenue_theoretical": round(b.get("revenue_theoretical", 0.0), 2),
+            "parking_payment": round(b.get("parking_payment", 0.0), 2),
+            "parking_discount": round(b.get("parking_discount", 0.0), 2),
+            "parking_rows": int(round(b.get("parking_rows", 0.0))),
+            "paid_rows": int(round(b.get("paid_rows", 0.0))),
+            "access_entries": int(round(b.get("access_entries", 0.0))),
+            "access_exits": int(round(b.get("access_exits", 0.0))),
+        }
+        for m_key in sorted(monthly_acc.keys())
+        for b in (monthly_acc[m_key],)
+    ]
+
+    hourly_series = []
+    for hr in range(24):
+        h_key = f"{hr:02d}"
+        hb = by_hour.get(h_key, {})
+        hourly_series.append({
+            "hour": f"{h_key}:00",
+            "revenue_gross": round(hb.get("revenue_gross", 0.0), 2),
+            "parking_payment": round(hb.get("parking_payment", 0.0), 2),
+            "parking_rows": int(round(hb.get("parking_rows", 0.0))),
+            "paid_rows": int(round(hb.get("paid_rows", 0.0))),
+            "access_entries": int(round(hb.get("access_entries", 0.0))),
+        })
+
+    cp_list = [
+        {
+            "car_park": cp_name,
+            "revenue_gross": round(cb.get("revenue_gross", 0.0), 2),
+            "revenue_theoretical": round(cb.get("revenue_theoretical", 0.0), 2),
+            "parking_payment": round(cb.get("parking_payment", 0.0), 2),
+            "parking_discount": round(cb.get("parking_discount", 0.0), 2),
+            "parking_rows": int(round(cb.get("parking_rows", 0.0))),
+            "paid_rows": int(round(cb.get("paid_rows", 0.0))),
+            "access_entries": int(round(cb.get("access_entries", 0.0))),
+            "access_exits": int(round(cb.get("access_exits", 0.0))),
+        }
+        for cp_name, cb in by_car_park.items()
+    ]
+    cp_list.sort(key=lambda x: (x["revenue_gross"], x["parking_payment"], x["parking_rows"]), reverse=True)
+    cp_list = cp_list[:25]
+
+    pm_list = [
+        {
+            "method": pm_name,
+            "count": int(round(pb.get("count", 0.0))),
+            "amount": round(pb.get("amount", 0.0), 2),
+        }
+        for pm_name, pb in payment_methods.items()
+    ]
+    pm_list.sort(key=lambda x: (x["amount"], x["count"]), reverse=True)
+    pm_list = pm_list[:12]
+
+    total_rows = paid_rows + free_rows
+    paid_pct = round((paid_rows / total_rows * 100.0), 2) if total_rows > 0 else 0.0
+
+    def _pick_metric(item: dict[str, Any]) -> tuple[float, float, int]:
+        return (
+            float(item.get("revenue_gross", 0.0) or item.get("parking_payment", 0.0)),
+            float(item.get("parking_payment", 0.0)),
+            int(item.get("parking_rows", 0) or item.get("access_entries", 0)),
+        )
+
+    peak_day_item = max(daily_series, key=_pick_metric) if daily_series else None
+    peak_hour_item = max(hourly_series, key=_pick_metric) if hourly_series else None
+    top_cp_item = cp_list[0] if cp_list else None
+    cp_total_basis = sum(max(c["revenue_gross"], c["parking_payment"]) for c in cp_list) or 1.0
+    if top_cp_item:
+        top_cp_val = max(top_cp_item["revenue_gross"], top_cp_item["parking_payment"])
+        top_share = round(top_cp_val / cp_total_basis * 100.0, 1) if cp_total_basis > 0 else 0.0
+    else:
+        top_share = 0.0
+
+    if batches_series and len(batches_series) > 1:
+        default_view = "monthly"
+    elif len(daily_series) > 35:
+        default_view = "monthly"
+    elif len(daily_series) <= 1:
+        default_view = "hourly"
+    else:
+        default_view = "daily"
+
+    return {
+        "default_view": default_view,
+        "kpis": {
+            "days_count": len(daily_series),
+            "months_count": len(monthly_series),
+            "total_rows": total_rows,
+            "paid_rows": paid_rows,
+            "free_rows": free_rows,
+            "paid_pct": paid_pct,
+            "revenue_theoretical": round(rev_theo, 2),
+            "revenue_gross": round(rev_gross, 2),
+            "parking_payment": round(pt_payment, 2),
+            "total_discount": round(total_discount, 2),
+            "access_entries": access_entries_total,
+            "access_exits": access_exits_total,
+            "peak_day": {
+                "date": peak_day_item["date"],
+                "revenue_gross": peak_day_item["revenue_gross"],
+                "parking_payment": peak_day_item["parking_payment"],
+                "parking_rows": peak_day_item["parking_rows"],
+            } if peak_day_item else None,
+            "peak_hour": {
+                "hour": peak_hour_item["hour"],
+                "revenue_gross": peak_hour_item["revenue_gross"],
+                "parking_payment": peak_hour_item["parking_payment"],
+                "parking_rows": peak_hour_item["parking_rows"],
+            } if peak_hour_item else None,
+            "top_car_park": {
+                "car_park": top_cp_item["car_park"],
+                "revenue_gross": top_cp_item["revenue_gross"],
+                "parking_payment": top_cp_item["parking_payment"],
+                "parking_rows": top_cp_item["parking_rows"],
+                "share_pct": top_share,
+            } if top_cp_item else None,
+        },
+        "daily_series": daily_series,
+        "monthly_series": monthly_series,
+        "hourly_series": hourly_series,
+        "by_car_park": cp_list,
+        "payment_methods": pm_list,
+        "batches_series": batches_series or [],
+    }
+
+
+def _build_insights_payload(
+    expected_dates: list[str],
+    indepth_results: dict[str, dict[str, Any]],
+    pt_info: Optional[dict[str, Any]],
+    rev_theo: float,
+    rev_gross: float,
+    pt_payment: float,
+    pt_discount: float,
+) -> dict[str, Any]:
+    """Assemble insights from one batch's validated workbook summaries."""
+    by_date: dict[str, dict[str, float]] = {d: {} for d in expected_dates}
+    by_hour: dict[str, dict[str, float]] = {}
+    by_car_park: dict[str, dict[str, float]] = {}
+
+    for tbl_key in ("revenue", "access"):
+        info = indepth_results.get(tbl_key)
+        if info and info.get("readable"):
+            _merge_bucket_map(by_date, info.get("by_date"))
+            _merge_bucket_map(by_hour, info.get("by_hour"))
+            _merge_bucket_map(by_car_park, info.get("by_car_park"))
+
+    payment_methods: dict[str, dict[str, float]] = {}
+    paid_rows = 0
+    free_rows = 0
+    if pt_info and pt_info.get("readable"):
+        _merge_bucket_map(by_date, pt_info.get("by_date"))
+        _merge_bucket_map(by_hour, pt_info.get("by_hour"))
+        _merge_bucket_map(by_car_park, pt_info.get("by_car_park"))
+        _merge_bucket_map(payment_methods, pt_info.get("payment_methods"))
+        paid_rows = int(pt_info.get("paid_rows", 0))
+        free_rows = int(pt_info.get("free_rows", 0))
+
+    return _compile_insights(
+        by_date=by_date,
+        by_hour=by_hour,
+        by_car_park=by_car_park,
+        payment_methods=payment_methods,
+        paid_rows=paid_rows,
+        free_rows=free_rows,
+        total_discount=pt_discount,
+        rev_theo=rev_theo,
+        rev_gross=rev_gross,
+        pt_payment=pt_payment,
+    )
+
+
+def _merge_insights_payloads(reports: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Combine `insights` dictionaries across multi-batch / multi-month reports."""
+    insight_reports = [r for r in reports if isinstance(r.get("insights"), dict)]
+    if not insight_reports:
+        return None
+
+    by_date: dict[str, dict[str, float]] = {}
+    by_hour: dict[str, dict[str, float]] = {}
+    by_car_park: dict[str, dict[str, float]] = {}
+    payment_methods: dict[str, dict[str, float]] = {}
+    paid_rows = 0
+    free_rows = 0
+    total_discount = 0.0
+    rev_theo = 0.0
+    rev_gross = 0.0
+    pt_payment = 0.0
+    batches_series: list[dict[str, Any]] = []
+
+    for r in insight_reports:
+        ins = r["insights"]
+        k = ins.get("kpis") or {}
+        paid_rows += int(k.get("paid_rows", 0))
+        free_rows += int(k.get("free_rows", 0))
+        total_discount += float(k.get("total_discount", 0.0))
+        rev_theo += float(k.get("revenue_theoretical", 0.0))
+        rev_gross += float(k.get("revenue_gross", 0.0))
+        pt_payment += float(k.get("parking_payment", 0.0))
+
+        for item in ins.get("daily_series") or []:
+            _accumulate_bucket(
+                by_date,
+                item.get("date"),
+                revenue_gross=item.get("revenue_gross", 0.0),
+                revenue_theoretical=item.get("revenue_theoretical", 0.0),
+                parking_payment=item.get("parking_payment", 0.0),
+                parking_discount=item.get("parking_discount", 0.0),
+                parking_rows=item.get("parking_rows", 0),
+                paid_rows=item.get("paid_rows", 0),
+                access_entries=item.get("access_entries", 0),
+                access_exits=item.get("access_exits", 0),
+            )
+        for item in ins.get("hourly_series") or []:
+            h_raw = str(item.get("hour", ""))[:2]
+            _accumulate_bucket(
+                by_hour,
+                h_raw,
+                revenue_gross=item.get("revenue_gross", 0.0),
+                parking_payment=item.get("parking_payment", 0.0),
+                parking_rows=item.get("parking_rows", 0),
+                paid_rows=item.get("paid_rows", 0),
+                access_entries=item.get("access_entries", 0),
+            )
+        for item in ins.get("by_car_park") or []:
+            _accumulate_bucket(
+                by_car_park,
+                item.get("car_park"),
+                revenue_gross=item.get("revenue_gross", 0.0),
+                revenue_theoretical=item.get("revenue_theoretical", 0.0),
+                parking_payment=item.get("parking_payment", 0.0),
+                parking_discount=item.get("parking_discount", 0.0),
+                parking_rows=item.get("parking_rows", 0),
+                paid_rows=item.get("paid_rows", 0),
+                access_entries=item.get("access_entries", 0),
+                access_exits=item.get("access_exits", 0),
+            )
+        for item in ins.get("payment_methods") or []:
+            _accumulate_bucket(
+                payment_methods,
+                item.get("method"),
+                count=item.get("count", 0),
+                amount=item.get("amount", 0.0),
+            )
+        batches_series.append({
+            "label": r.get("batch_name") or r.get("file_prefix") or "Batch",
+            "start_date": r.get("start_date", ""),
+            "end_date": r.get("end_date", ""),
+            "revenue_gross": round(float(k.get("revenue_gross", 0.0)), 2),
+            "revenue_theoretical": round(float(k.get("revenue_theoretical", 0.0)), 2),
+            "parking_payment": round(float(k.get("parking_payment", 0.0)), 2),
+            "parking_discount": round(float(k.get("total_discount", 0.0)), 2),
+            "parking_rows": int(k.get("total_rows", 0)),
+            "access_entries": int(k.get("access_entries", 0)),
+        })
+
+    return _compile_insights(
+        by_date=by_date,
+        by_hour=by_hour,
+        by_car_park=by_car_park,
+        payment_methods=payment_methods,
+        paid_rows=paid_rows,
+        free_rows=free_rows,
+        total_discount=total_discount,
+        rev_theo=rev_theo,
+        rev_gross=rev_gross,
+        pt_payment=pt_payment,
+        batches_series=batches_series,
     )
 
 
@@ -1322,6 +1789,7 @@ def merge_validation_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "hard_failures": all_hard,
         "soft_warnings": all_soft,
+        "insights": _merge_insights_payloads(reports),
         "batches": [
             {
                 "batch_name": r.get("batch_name"),

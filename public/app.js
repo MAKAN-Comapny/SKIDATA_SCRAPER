@@ -18,11 +18,18 @@ let lastDispatchedAt = 0;
 let pendingModalCallback = null;
 let validationEnabled = sessionStorage.getItem("skidata_validation_enabled") !== "false";
 let latestValidationReport = null;
+let latestInsightsJob = null;
+let insightActiveView = "daily";
+let insightCpMetric = "financial";
+let insightLastReportKey = null;
+let insightLastDrawSignature = null;
+const insightCharts = { time: null, mix: null, carPark: null };
 
 document.addEventListener("DOMContentLoaded", () => {
   initAuth();
   initValidationToggle();
   initValidationReportDrawer();
+  initInsightsControls();
   initTabs();
   initMonthsGrid();
   initHistModeSwitch();
@@ -151,6 +158,23 @@ function initValidationReportDrawer() {
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     });
   }
+}
+
+function initInsightsControls() {
+  document.querySelectorAll(".insight-view-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      insightActiveView = btn.dataset.insightView || "daily";
+      insightLastDrawSignature = null;
+      if (latestInsightsJob) renderDataInsights(latestInsightsJob);
+    });
+  });
+  document.querySelectorAll(".insight-cp-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      insightCpMetric = btn.dataset.cpMetric || "financial";
+      insightLastDrawSignature = null;
+      if (latestInsightsJob) renderDataInsights(latestInsightsJob);
+    });
+  });
 }
 
 // ================= 1. AUTHENTICATION =================
@@ -1340,6 +1364,7 @@ function renderValidationReport(job, opts = {}) {
         "Validation Gate is turned OFF. Next launch will skip completeness, schema & financial verification checks."
       );
     }
+    renderDataInsights(job);
     return;
   }
 
@@ -1356,6 +1381,7 @@ function renderValidationReport(job, opts = {}) {
         ? "Extracting & cleaning tables now. Full Validation Gate report will appear automatically once checks finish."
         : "Validation Gate disabled for this run to prioritize download speed."
     );
+    renderDataInsights(job);
     return;
   }
 
@@ -1396,6 +1422,7 @@ function renderValidationReport(job, opts = {}) {
         "Workflow completed successfully (no validation-report artifact attached for this run mode)."
       );
     }
+    renderDataInsights(job);
     return;
   }
 
@@ -1525,6 +1552,336 @@ function renderValidationReport(job, opts = {}) {
   }
   renderFindingsList("valHardFailuresBox", "valHardFailuresList", hardList, "hard");
   renderFindingsList("valSoftWarningsBox", "valSoftWarningsList", report.soft_warnings || [], "soft");
+  renderDataInsights(job);
+}
+
+function destroyInsightCharts() {
+  for (const key of Object.keys(insightCharts)) {
+    if (insightCharts[key] && typeof insightCharts[key].destroy === "function") {
+      insightCharts[key].destroy();
+    }
+    insightCharts[key] = null;
+  }
+}
+
+function renderOrReplaceChart(chartKey, canvasId, boxId, chartConfig, fallbackItems) {
+  const canvas = document.getElementById(canvasId);
+  const box = document.getElementById(boxId);
+  if (!canvas || !box) return;
+
+  if (insightCharts[chartKey] && typeof insightCharts[chartKey].destroy === "function") {
+    insightCharts[chartKey].destroy();
+    insightCharts[chartKey] = null;
+  }
+
+  if (typeof window.Chart !== "function") {
+    // Graceful HTML bar fallback if Chart.js CDN is blocked/offline
+    const rows = fallbackItems || [];
+    const maxVal = Math.max(1, ...rows.map(r => Number(r.value || 0)));
+    box.innerHTML = `<div class="space-y-1.5 overflow-y-auto max-h-full pr-1">${
+      rows.slice(0, 12).map(r => {
+        const pct = Math.max(2, Math.round((Number(r.value || 0) / maxVal) * 100));
+        return `
+          <div class="text-[10px] font-mono">
+            <div class="flex justify-between text-slate-300 mb-0.5">
+              <span>${escapeHtml(r.label)}</span><span>${Number(r.value || 0).toLocaleString()}</span>
+            </div>
+            <div class="h-1.5 bg-slate-800 rounded overflow-hidden">
+              <div class="h-full bg-emerald-500 rounded" style="width:${pct}%"></div>
+            </div>
+          </div>`;
+      }).join("") || '<p class="text-[11px] text-slate-500">No data points available.</p>'
+    }</div>`;
+    return;
+  }
+
+  insightCharts[chartKey] = new window.Chart(canvas.getContext("2d"), chartConfig);
+}
+
+function styleInsightButtonGroup(selector, activeKey, dataAttr) {
+  document.querySelectorAll(selector).forEach((btn) => {
+    const isActive = btn.dataset[dataAttr] === activeKey;
+    btn.className = isActive
+      ? `${selector.slice(1)} px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-sky-500/20 text-sky-300 border border-sky-500/40 transition`
+      : `${selector.slice(1)} px-2.5 py-1 rounded-lg text-[11px] font-medium text-slate-400 hover:text-white border border-transparent transition`;
+  });
+}
+
+function renderDataInsights(job) {
+  latestInsightsJob = job;
+  const scopeBadge = document.getElementById("insightsScopeBadge");
+  const viewTabs = document.getElementById("insightViewTabs");
+  const emptyState = document.getElementById("insightsEmptyState");
+  const emptyMsg = document.getElementById("insightsEmptyMsg");
+  const body = document.getElementById("insightsDashboardBody");
+  if (!scopeBadge || !emptyState || !body) return;
+
+  const report = (job && job.validation_report) || null;
+  const ins = (report && report.insights) || null;
+
+  if (!ins) {
+    destroyInsightCharts();
+    insightLastReportKey = null;
+    insightLastDrawSignature = null;
+    body.classList.add("hidden");
+    if (viewTabs) viewTabs.classList.add("hidden");
+    emptyState.classList.remove("hidden");
+
+    if (job && (job.status === "running" || job.status === "queued")) {
+      scopeBadge.textContent = "Generating...";
+      if (emptyMsg) emptyMsg.textContent = "Extracting & validating tables — interactive Insight Graphs will render automatically once Validation Gate completes.";
+    } else if (report && report.status === "bypassed") {
+      scopeBadge.textContent = "Gate Off (Bypassed)";
+      if (emptyMsg) emptyMsg.textContent = "Insight Graphs are skipped while Validation Gate is OFF (fast bypass mode). Switch Validation Gate ON for analytics.";
+    } else {
+      scopeBadge.textContent = "Awaiting Fetch";
+      if (emptyMsg) emptyMsg.textContent = "Run a Day, Date Range, or Month extraction with Validation Gate enabled to visualize fetched insights.";
+    }
+    return;
+  }
+
+  const reportKey = `${report.generated_at || ""}|${report.file_prefix || ""}|${report.batch_name || ""}`;
+  if (reportKey !== insightLastReportKey) {
+    insightLastReportKey = reportKey;
+    insightActiveView = ins.default_view || "daily";
+    insightLastDrawSignature = null;
+  }
+
+  if (viewTabs) viewTabs.classList.remove("hidden");
+  emptyState.classList.add("hidden");
+  body.classList.remove("hidden");
+  styleInsightButtonGroup(".insight-view-tab", insightActiveView, "insightView");
+  styleInsightButtonGroup(".insight-cp-tab", insightCpMetric, "cpMetric");
+
+  const k = ins.kpis || {};
+  const batchCount = Array.isArray(ins.batches_series) ? ins.batches_series.length : 0;
+  if (batchCount > 1) {
+    scopeBadge.textContent = `${batchCount} Months · ${k.days_count || 0} Days`;
+  } else if ((k.days_count || 0) <= 1) {
+    scopeBadge.textContent = `Single Day (${report.start_date || report.file_prefix || "1d"}) · Hourly`;
+  } else {
+    scopeBadge.textContent = `${k.days_count} Days (${report.start_date || ""} -> ${report.end_date || ""})`;
+  }
+
+  // Update 4 executive KPI tiles
+  const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+  const gross = Number(k.revenue_gross || 0);
+  const pay = Number(k.parking_payment || 0);
+  const theo = Number(k.revenue_theoretical || 0);
+  const disc = Number(k.total_discount || 0);
+  const revDisplay = gross > 0 ? gross : pay;
+  setText("insKpiRevMain", `${revDisplay.toLocaleString()} SAR`);
+  setText("insKpiRevSub", `PT Pay ${pay.toLocaleString()} · Theo ${theo.toLocaleString()} · Disc ${disc.toLocaleString()}`);
+
+  const totRows = Number(k.total_rows || 0);
+  const paidRows = Number(k.paid_rows || 0);
+  const freeRows = Number(k.free_rows || 0);
+  setText("insKpiRowsMain", `${totRows.toLocaleString()} txns`);
+  setText("insKpiRowsSub", `${paidRows.toLocaleString()} paid (${k.paid_pct ?? 0}%) · ${freeRows.toLocaleString()} free`);
+
+  const entries = Number(k.access_entries || 0);
+  const exits = Number(k.access_exits || 0);
+  const pkHour = k.peak_hour;
+  const pkDay = k.peak_day;
+  const isSingleDayView = (k.days_count || 0) <= 1 || insightActiveView === "hourly";
+  const peakMain = entries > 0
+    ? `${entries.toLocaleString()} entries`
+    : pkHour && isSingleDayView
+      ? `Peak ${pkHour.hour}`
+      : pkDay
+        ? `Peak ${pkDay.date}`
+        : "-";
+  const peakSub = isSingleDayView && pkHour
+    ? `Peak Hr ${pkHour.hour} (${Number(pkHour.revenue_gross || pkHour.parking_payment || 0).toLocaleString()} SAR)`
+    : pkDay
+      ? `Peak Day ${pkDay.date} (${Number(pkDay.revenue_gross || pkDay.parking_payment || 0).toLocaleString()} SAR)${exits ? ` · Exits ${exits.toLocaleString()}` : ""}`
+      : "No gate metrics";
+  setText("insKpiPeakMain", peakMain);
+  setText("insKpiPeakSub", peakSub);
+
+  const topCp = k.top_car_park;
+  setText("insKpiTopCpMain", topCp ? topCp.car_park : "-");
+  setText(
+    "insKpiTopCpSub",
+    topCp
+      ? `${Number(topCp.revenue_gross || topCp.parking_payment || 0).toLocaleString()} SAR (${topCp.share_pct ?? 0}% share) · ${Number(topCp.parking_rows || 0).toLocaleString()} txns`
+      : "No car park breakdown"
+  );
+
+  // Skip heavy canvas teardown/rebuild when data & active tabs are identical across 5s polls
+  const drawSignature = `${reportKey}|${insightActiveView}|${insightCpMetric}`;
+  if (drawSignature === insightLastDrawSignature) return;
+  insightLastDrawSignature = drawSignature;
+
+  // 1. Dynamic Time-Series Chart (Daily / Monthly / Hourly)
+  const daily = ins.daily_series || [];
+  const monthly = (Array.isArray(ins.batches_series) && ins.batches_series.length > 1)
+    ? ins.batches_series
+    : (ins.monthly_series || []).map(m => ({ ...m, label: m.month }));
+  const hourly = ins.hourly_series || [];
+
+  let timeLabels = [];
+  let revSeries = [];
+  let paySeries = [];
+  let volSeries = [];
+  let timeFallback = [];
+  if (insightActiveView === "hourly") {
+    setText("insTimeChartTitle", "24-Hour Peak Revenue & Barrier Traffic Profile");
+    setText("insTimeChartHint", "Best for Day-wise & Rush-Hour analysis · Green/Cyan: SAR · Dashed Indigo: Txns / Entries");
+    timeLabels = hourly.map(h => h.hour);
+    revSeries = hourly.map(h => h.revenue_gross || 0);
+    paySeries = hourly.map(h => h.parking_payment || 0);
+    volSeries = hourly.map(h => h.parking_rows || h.access_entries || 0);
+    timeFallback = hourly.map(h => ({ label: h.hour, value: h.revenue_gross || h.parking_payment || h.parking_rows || 0 }));
+  } else if (insightActiveView === "monthly") {
+    setText("insTimeChartTitle", "Monthly / Batch Revenue, Payment & Volume Rollup");
+    setText("insTimeChartHint", "Compares Gross Revenue vs PT Payment (SAR) & total Parking Volume per month/batch");
+    timeLabels = monthly.map(m => m.label || m.month);
+    revSeries = monthly.map(m => m.revenue_gross || 0);
+    paySeries = monthly.map(m => m.parking_payment || 0);
+    volSeries = monthly.map(m => m.parking_rows || m.access_entries || 0);
+    timeFallback = monthly.map(m => ({ label: m.label || m.month, value: m.revenue_gross || m.parking_payment || m.parking_rows || 0 }));
+  } else {
+    setText("insTimeChartTitle", "Daily Revenue vs Payment & Parking Volume Trend");
+    setText("insTimeChartHint", "Drops to 0 expose missing dates visually · Green/Cyan: SAR · Dashed Indigo: Parking Sessions");
+    timeLabels = daily.map(d => d.date.slice(5));
+    revSeries = daily.map(d => d.revenue_gross || 0);
+    paySeries = daily.map(d => d.parking_payment || 0);
+    volSeries = daily.map(d => d.parking_rows || d.access_entries || 0);
+    timeFallback = daily.map(d => ({ label: d.date, value: d.revenue_gross || d.parking_payment || d.parking_rows || 0 }));
+  }
+
+  renderOrReplaceChart("time", "insightTimeChart", "insTimeChartBox", {
+    type: "bar",
+    data: {
+      labels: timeLabels,
+      datasets: [
+        {
+          label: "Gross Revenue (SAR)",
+          data: revSeries,
+          backgroundColor: "rgba(34, 197, 94, 0.72)",
+          borderColor: "#22c55e",
+          borderWidth: 1,
+          borderRadius: 4,
+          yAxisID: "y",
+        },
+        {
+          label: "PT Payment (SAR)",
+          data: paySeries,
+          backgroundColor: "rgba(14, 165, 233, 0.68)",
+          borderColor: "#0ea5e9",
+          borderWidth: 1,
+          borderRadius: 4,
+          yAxisID: "y",
+        },
+        {
+          label: "Volume (Txns / Entries)",
+          data: volSeries,
+          type: "line",
+          borderColor: "#a78bfa",
+          backgroundColor: "rgba(167, 139, 250, 0.15)",
+          borderWidth: 2,
+          borderDash: [4, 3],
+          pointRadius: timeLabels.length > 25 ? 1.5 : 3,
+          tension: 0.25,
+          yAxisID: "y1",
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { labels: { color: "#cbd5e1", font: { size: 10 } } },
+      },
+      scales: {
+        x: { ticks: { color: "#94a3b8", font: { size: 10 }, maxRotation: 45 }, grid: { color: "rgba(51,65,85,0.25)" } },
+        y: {
+          position: "left",
+          beginAtZero: true,
+          ticks: { color: "#94a3b8", font: { size: 10 } },
+          grid: { color: "rgba(51,65,85,0.35)" },
+          title: { display: true, text: "SAR", color: "#94a3b8", font: { size: 10 } },
+        },
+        y1: {
+          position: "right",
+          beginAtZero: true,
+          ticks: { color: "#a78bfa", font: { size: 10 } },
+          grid: { drawOnChartArea: false },
+          title: { display: true, text: "Count", color: "#a78bfa", font: { size: 10 } },
+        },
+      },
+    },
+  }, timeFallback);
+
+  // 2. Payment Method Mix Doughnut
+  const methods = ins.payment_methods || [];
+  const palette = ["#22c55e", "#0ea5e9", "#f59e0b", "#a78bfa", "#f43f5e", "#14b8a6"];
+  setText("insPaidRatioPill", `${k.paid_pct ?? 0}% Paid (${paidRows.toLocaleString()})`);
+  const mixLegend = document.getElementById("insMixLegendList");
+  if (mixLegend) {
+    mixLegend.innerHTML = methods.length
+      ? methods.slice(0, 5).map((m, idx) => `
+          <li class="flex items-center justify-between gap-2">
+            <span class="flex items-center gap-1.5 truncate">
+              <span class="w-2 h-2 rounded-full shrink-0" style="background:${palette[idx % palette.length]}"></span>
+              <span class="truncate">${escapeHtml(m.method)}</span>
+            </span>
+            <span class="text-slate-400 shrink-0">${Number(m.amount || 0).toLocaleString()} SAR (${Number(m.count || 0).toLocaleString()})</span>
+          </li>`).join("")
+      : '<li class="text-slate-500">No paid tender breakdown in this filter.</li>';
+  }
+  renderOrReplaceChart("mix", "insightMixChart", "insMixChartBox", {
+    type: "doughnut",
+    data: {
+      labels: methods.map(m => m.method),
+      datasets: [{
+        data: methods.map(m => m.amount || 0),
+        backgroundColor: methods.map((_, idx) => palette[idx % palette.length]),
+        borderColor: "#0f172a",
+        borderWidth: 2,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: "62%",
+      plugins: { legend: { display: false } },
+    },
+  }, methods.map(m => ({ label: m.method, value: m.amount || 0 })));
+
+  // 3. Car Park Breakdown Chart (Financial SAR vs Traffic Switcher)
+  const cps = (ins.by_car_park || []).slice(0, 12);
+  const isTrafficCp = insightCpMetric === "traffic";
+  setText("insCpChartHint", isTrafficCp
+    ? "Parking-Transactions row counts vs Access-In-Depth Entries by site"
+    : "Compare Revenue-In-Depth Gross Revenue vs Parking-Transactions Payment across locations");
+  renderOrReplaceChart("carPark", "insightCarParkChart", "insCpChartBox", {
+    type: "bar",
+    data: {
+      labels: cps.map(c => c.car_park),
+      datasets: isTrafficCp
+        ? [
+            { label: "Parking Rows", data: cps.map(c => c.parking_rows || 0), backgroundColor: "rgba(14, 165, 233, 0.72)", borderRadius: 4 },
+            { label: "Access Entries", data: cps.map(c => c.access_entries || 0), backgroundColor: "rgba(167, 139, 250, 0.72)", borderRadius: 4 },
+          ]
+        : [
+            { label: "Gross Revenue (SAR)", data: cps.map(c => c.revenue_gross || 0), backgroundColor: "rgba(34, 197, 94, 0.75)", borderRadius: 4 },
+            { label: "PT Payment (SAR)", data: cps.map(c => c.parking_payment || 0), backgroundColor: "rgba(14, 165, 233, 0.72)", borderRadius: 4 },
+          ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: { legend: { labels: { color: "#cbd5e1", font: { size: 10 } } } },
+      scales: {
+        x: { ticks: { color: "#cbd5e1", font: { size: 10 } }, grid: { color: "rgba(51,65,85,0.2)" } },
+        y: { beginAtZero: true, ticks: { color: "#94a3b8", font: { size: 10 } }, grid: { color: "rgba(51,65,85,0.35)" } },
+      },
+    },
+  }, cps.map(c => ({ label: c.car_park, value: isTrafficCp ? (c.parking_rows || c.access_entries || 0) : (c.revenue_gross || c.parking_payment || 0) })));
 }
 
 function renderResultBanner(job) {
