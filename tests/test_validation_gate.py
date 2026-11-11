@@ -437,6 +437,22 @@ class TestValidationGateTiers(unittest.TestCase):
         self.assertFalse(mock_start.call_args.args[0]["validate"])
         self.assertEqual(PortalZeroDataError.__name__, "PortalZeroDataError")
 
+    def test_portal_serves_mangekyou_sharingan_favicon(self):
+        client = TestClient(portal_server.app)
+        res_html = client.get("/")
+        self.assertEqual(res_html.status_code, 200)
+        self.assertIn('href="./favicon.webp"', res_html.text)
+        self.assertIn('href="./favicon.png"', res_html.text)
+
+        res_webp = client.get("/favicon.webp")
+        self.assertEqual(res_webp.status_code, 200)
+        self.assertTrue(res_webp.content.startswith(b"RIFF"))
+        self.assertEqual(res_webp.content[8:12], b"WEBP")
+
+        res_png = client.get("/favicon.png")
+        self.assertEqual(res_png.status_code, 200)
+        self.assertTrue(res_png.content.startswith(b"\x89PNG\r\n\x1a\n"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -234,6 +234,24 @@ def cancel_job(authenticated: bool = Depends(verify_auth_token)):
 app.mount("/static", StaticFiles(directory=PORTAL_DIR), name="static")
 
 
+def _serve_portal_asset(filename: str):
+    """Serve a static asset from `portal/` with 404 fallback if missing."""
+    asset_path = os.path.join(PORTAL_DIR, filename)
+    if os.path.exists(asset_path):
+        return FileResponse(asset_path)
+    raise HTTPException(status_code=404, detail=f"Asset not found: {filename}")
+
+
+@app.get("/favicon.webp", include_in_schema=False)
+def serve_favicon_webp():
+    return _serve_portal_asset("favicon.webp")
+
+
+@app.get("/favicon.png", include_in_schema=False)
+def serve_favicon_png():
+    return _serve_portal_asset("favicon.png")
+
+
 @app.get("/")
 def serve_index():
     index_file = os.path.join(PORTAL_DIR, "index.html")
