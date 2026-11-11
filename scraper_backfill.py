@@ -424,7 +424,7 @@ async def run_parking_transactions_flow(
     file_prefix: str,
 ) -> None:
     """Open Parking Transactions sheet, apply date filter, and export data."""
-    import pandas as pd
+    from excel_merge import merge_parking_xlsx
 
     target_path = os.path.join(download_dir, f"{file_prefix}-Parking-Transactions.xlsx")
     if os.path.exists(target_path) and os.path.getsize(target_path) > 10_000:
@@ -522,7 +522,7 @@ async def run_parking_transactions_flow(
     # If full month export didn't return a link in 90 seconds (Qlik 100k row limit reached), fallback to day-by-day:
     print("\n" + "!" * 65)
     print("Full-month single export timed out or exceeded Qlik calculation limit.")
-    print("Activating day-by-day extraction and consolidating with pandas...")
+    print("Activating day-by-day extraction and consolidating Excel files...")
     print("!" * 65)
 
     # Close any open export dialogs
@@ -565,10 +565,8 @@ async def run_parking_transactions_flow(
         raise RuntimeError(f"No daily parking transactions were extracted for range {start_date} -> {end_date}.")
 
     print(f"\nMerging {len(valid_day_files)} daily files into {target_path}...")
-    dfs = [pd.read_excel(f) for f in valid_day_files]
-    merged_df = pd.concat(dfs, ignore_index=True)
-    merged_df.to_excel(target_path, index=False)
-    print(f"SUCCESS: Consolidated {len(merged_df):,} total rows to {target_path} ({os.path.getsize(target_path):,} bytes)!")
+    total_rows = merge_parking_xlsx(valid_day_files, target_path)
+    print(f"SUCCESS: Consolidated {total_rows:,} total rows to {target_path} ({os.path.getsize(target_path):,} bytes)!")
 
 
 async def scrape_month(
