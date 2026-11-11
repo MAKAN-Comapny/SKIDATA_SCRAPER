@@ -541,6 +541,53 @@ class TestValidationGateTiers(unittest.TestCase):
         self.assertIn("valAuditMetaBar", res_html.text)
         self.assertIn("Audit Report Kept in UI", res_html.text)
 
+    def test_dynamic_insights_across_day_range_and_multi_month_plus_ui(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # 1) Single-day fetch -> default_view='hourly', 24-hr buckets populated
+            d_single = date(2026, 10, 7)
+            spec1, exp1, cln1 = _build_complete_clean_fixture(
+                os.path.join(tmp, "day1"), [d_single], prefix="07-Oct-26", payment_per_row=25.0
+            )
+            rep1 = validate_backfill_run(spec1, cln1, exp1, sheet_filter="all")
+            ins1 = rep1.get("insights") or {}
+            self.assertEqual(ins1.get("default_view"), "hourly")
+            self.assertEqual(len(ins1.get("daily_series", [])), 1)
+            self.assertEqual(len(ins1.get("hourly_series", [])), 24)
+            hr11 = next(h for h in ins1["hourly_series"] if h["hour"] == "11:00")
+            self.assertEqual(hr11["parking_rows"], 2)
+            self.assertEqual(hr11["parking_payment"], 50.0)
+            self.assertEqual(ins1["by_car_park"][0]["car_park"], "View Mall")
+            self.assertEqual(ins1["payment_methods"][0]["method"], "Card")
+
+            # 2) Multi-day range -> default_view='daily', 3 daily points
+            d_rng = [date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 3)]
+            spec2, exp2, cln2 = _build_complete_clean_fixture(
+                os.path.join(tmp, "range3"), d_rng, prefix="01-Oct-26-to-03-Oct-26", payment_per_row=20.0
+            )
+            rep2 = validate_backfill_run(spec2, cln2, exp2, sheet_filter="all")
+            ins2 = rep2.get("insights") or {}
+            self.assertEqual(ins2.get("default_view"), "daily")
+            self.assertEqual(len(ins2.get("daily_series", [])), 3)
+
+            # 3) Multi-month merge -> default_view='monthly', 2 batches & 2 monthly buckets
+            d_aug = [date(2026, 8, 5)]
+            spec_a, exp_a, cln_a = _build_complete_clean_fixture(
+                os.path.join(tmp, "aug"), d_aug, prefix="Aug-26", payment_per_row=30.0
+            )
+            rep_aug = validate_backfill_run(spec_a, cln_a, exp_a, sheet_filter="all")
+            merged = merge_validation_reports([rep_aug, rep1])
+            ins_m = merged.get("insights") or {}
+            self.assertEqual(ins_m.get("default_view"), "monthly")
+            self.assertEqual(len(ins_m.get("batches_series", [])), 2)
+            self.assertEqual([m["month"] for m in ins_m.get("monthly_series", [])], ["2026-08", "2026-10"])
+            self.assertEqual(ins_m["kpis"]["parking_payment"], 110.0)
+
+        client = TestClient(portal_server.app)
+        res_html = client.get("/")
+        self.assertEqual(res_html.status_code, 200)
+        for token in ("dataInsightsSection", "insightTimeChart", "insightCarParkChart", "insightMixChart", "chart.umd.min.js"):
+            self.assertIn(token, res_html.text)
+
 
 if __name__ == "__main__":
     unittest.main()
