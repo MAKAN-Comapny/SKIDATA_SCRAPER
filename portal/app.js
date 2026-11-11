@@ -1436,11 +1436,16 @@ function renderValidationReport(job, opts = {}) {
   setValidationCheckCard("valCard_schema", st.status || (rStatus === "bypassed" ? "bypassed" : "skipped"), stTxt);
 
   const rec = checks.reconciliation || {};
+  let recSuffix = "";
+  if (rec.pre_clean_totals_match === false) recSuffix = " · Pre-clean Totals mismatch";
+  else if (Array.isArray(rec.missing_in_parking_dates) && rec.missing_in_parking_dates.length > 0) {
+    recSuffix = ` · Missing PT day (${rec.missing_in_parking_dates.length})`;
+  }
   const recTxt = rStatus === "bypassed"
     ? "Bypassed"
     : rec.status === "skipped"
       ? "Skipped (single-table filter)"
-      : `Rev ${Number(rec.revenue_gross || 0).toLocaleString()} vs Pay ${Number(rec.parking_payment || 0).toLocaleString()} (${rec.revenue_diff_pct ?? 0}%)`;
+      : `Rev ${Number(rec.revenue_gross || 0).toLocaleString()} vs Pay ${Number(rec.parking_payment || 0).toLocaleString()} (${rec.revenue_diff_pct ?? 0}%)${recSuffix}`;
   setValidationCheckCard("valCard_reconciliation", rec.status || (rStatus === "bypassed" ? "bypassed" : "skipped"), recTxt);
 
   const anom = checks.anomalies || {};

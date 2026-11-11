@@ -453,6 +453,49 @@ class TestValidationGateTiers(unittest.TestCase):
         self.assertEqual(res_png.status_code, 200)
         self.assertTrue(res_png.content.startswith(b"\x89PNG\r\n\x1a\n"))
 
+    def test_pre_clean_revenue_totals_ignores_qlik_subgroup_subtotals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # (a) Table-wide Grand Total row (Facility=='Totals') wins over earlier 0-rev subgroup Totals
+            src_a = os.path.join(tmp, "exp_a")
+            dst_a = os.path.join(tmp, "cln_a")
+            os.makedirs(src_a, exist_ok=True)
+            _write_indepth_xlsx(
+                os.path.join(src_a, "07-Oct-26-Revenue-In-Depth.xlsx"),
+                ["Facility", "Car Park", "Article", "Date", "Quantity", "Theoretical Revenue", "Gross Revenue"],
+                [
+                    ["Makan", "View Mall", "VIP Free", "07-Oct-2026", 4, 0.0, 0.0],
+                    ["Makan", "View Mall", "VIP Free", "Totals", 4, 0.0, 0.0],
+                    ["Makan", "View Mall", "Short Term", "07-Oct-2026", 20040, 26115.0, 26115.0],
+                    ["Makan", "View Mall", "Short Term", "Totals", 20040, 26115.0, 26115.0],
+                    ["Totals", "", "", "", 20044, 26115.0, 26115.0],
+                ],
+                raw_with_title=True,
+            )
+            meta_a = clean_backfill_directory(src_a, dst_a, strict=True)
+            totals_a = meta_a["revenue_pre_clean_totals"]["07-Oct-26-Revenue-In-Depth.xlsx"]
+            self.assertEqual(totals_a["Quantity"], 20044.0)
+            self.assertEqual(totals_a["Gross Revenue"], 26115.0)
+            summary_a = inspect_xlsx_summary(os.path.join(dst_a, "07-Oct-26-Revenue-In-Depth.xlsx"))
+            self.assertEqual(summary_a["row_count"], 2)
+
+            # (b) Multiple per-subgroup Date=='Totals' rows without a Grand Total row -> returns None (not Qty=4 / Gross=0)
+            src_b = os.path.join(tmp, "exp_b")
+            dst_b = os.path.join(tmp, "cln_b")
+            os.makedirs(src_b, exist_ok=True)
+            _write_indepth_xlsx(
+                os.path.join(src_b, "07-Oct-26-Revenue-In-Depth.xlsx"),
+                ["Facility", "Car Park", "Article", "Date", "Quantity", "Theoretical Revenue", "Gross Revenue"],
+                [
+                    ["Makan", "View Mall", "VIP Free", "07-Oct-2026", 4, 0.0, 0.0],
+                    ["Makan", "View Mall", "VIP Free", "Totals", 4, 0.0, 0.0],
+                    ["Makan", "Mall of Arabia", "Short Term", "07-Oct-2026", 10, 500.0, 500.0],
+                    ["Makan", "Mall of Arabia", "Short Term", "Totals", 10, 500.0, 500.0],
+                ],
+                raw_with_title=True,
+            )
+            meta_b = clean_backfill_directory(src_b, dst_b, strict=True)
+            self.assertNotIn("07-Oct-26-Revenue-In-Depth.xlsx", meta_b["revenue_pre_clean_totals"])
+
 
 if __name__ == "__main__":
     unittest.main()
