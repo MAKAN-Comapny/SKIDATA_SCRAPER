@@ -441,8 +441,8 @@ class TestValidationGateTiers(unittest.TestCase):
         client = TestClient(portal_server.app)
         res_html = client.get("/")
         self.assertEqual(res_html.status_code, 200)
-        self.assertIn('href="./favicon.webp"', res_html.text)
-        self.assertIn('href="./favicon.png"', res_html.text)
+        self.assertIn("./favicon.webp?v=2", res_html.text)
+        self.assertIn("./favicon.png?v=2", res_html.text)
 
         res_webp = client.get("/favicon.webp")
         self.assertEqual(res_webp.status_code, 200)
