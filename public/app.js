@@ -100,14 +100,26 @@ function updateValidationToggleUI() {
   }
 }
 
+let valJsonLastReportKey = null;
+
+function updateValJsonToggleLabel(isHidden) {
+  const toggleBtn = document.getElementById("valToggleJsonBtn");
+  if (!toggleBtn) return;
+  toggleBtn.innerHTML = isHidden
+    ? '<i class="fa-solid fa-code mr-1 text-brand-400"></i>Show JSON'
+    : '<i class="fa-solid fa-code mr-1 text-brand-400"></i>Hide JSON';
+}
+
 function initValidationReportDrawer() {
   const toggleBtn = document.getElementById("valToggleJsonBtn");
   const copyBtn = document.getElementById("valCopyJsonBtn");
+  const downloadBtn = document.getElementById("valDownloadJsonBtn");
   const wrapper = document.getElementById("valJsonWrapper");
 
   if (toggleBtn && wrapper) {
     toggleBtn.addEventListener("click", () => {
       wrapper.classList.toggle("hidden");
+      updateValJsonToggleLabel(wrapper.classList.contains("hidden"));
     });
   }
   if (copyBtn) {
@@ -122,6 +134,21 @@ function initValidationReportDrawer() {
       } catch {
         // Fallback silently if clipboard permission unavailable
       }
+    });
+  }
+  if (downloadBtn) {
+    downloadBtn.addEventListener("click", () => {
+      if (!latestValidationReport) return;
+      const prefix = String(latestValidationReport.file_prefix || "skidata").replace(/[^a-zA-Z0-9_-]/g, "_");
+      const blob = new Blob([JSON.stringify(latestValidationReport, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${prefix}_validation_report.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     });
   }
 }
@@ -1247,8 +1274,10 @@ function renderValidationReport(job, opts = {}) {
   const verdictEl = document.getElementById("valReportVerdictBadge");
   const summaryEl = document.getElementById("valReportSummaryText");
   const compGrid = document.getElementById("valComponentGrid");
+  const auditBar = document.getElementById("valAuditMetaBar");
   const toggleBtn = document.getElementById("valToggleJsonBtn");
   const copyBtn = document.getElementById("valCopyJsonBtn");
+  const downloadBtn = document.getElementById("valDownloadJsonBtn");
   const jsonWrapper = document.getElementById("valJsonWrapper");
   const jsonPre = document.getElementById("valJsonPre");
 
@@ -1267,9 +1296,12 @@ function renderValidationReport(job, opts = {}) {
 
   const hideExtras = () => {
     latestValidationReport = null;
+    valJsonLastReportKey = null;
     if (compGrid) compGrid.classList.add("hidden");
+    if (auditBar) auditBar.classList.add("hidden");
     if (toggleBtn) toggleBtn.classList.add("hidden");
     if (copyBtn) copyBtn.classList.add("hidden");
+    if (downloadBtn) downloadBtn.classList.add("hidden");
     if (jsonWrapper) jsonWrapper.classList.add("hidden");
     renderFindingsList("valHardFailuresBox", "valHardFailuresList", [], "hard");
     renderFindingsList("valSoftWarningsBox", "valSoftWarningsList", [], "soft");
@@ -1367,14 +1399,43 @@ function renderValidationReport(job, opts = {}) {
     return;
   }
 
-  // Full structured _validation_report.json available
+  // Full structured _validation_report.json available inside UI (never uploaded to SharePoint)
   latestValidationReport = report;
   if (jsonPre) jsonPre.textContent = JSON.stringify(report, null, 2);
+  if (downloadBtn) downloadBtn.classList.remove("hidden");
   if (toggleBtn) toggleBtn.classList.remove("hidden");
   if (copyBtn) copyBtn.classList.remove("hidden");
   if (compGrid) compGrid.classList.remove("hidden");
 
+  const reportKey = `${report.generated_at || ""}|${report.file_prefix || ""}|${report.status || ""}`;
+  if (jsonWrapper && reportKey !== valJsonLastReportKey) {
+    valJsonLastReportKey = reportKey;
+    jsonWrapper.classList.remove("hidden");
+    updateValJsonToggleLabel(false);
+  } else if (jsonWrapper) {
+    updateValJsonToggleLabel(jsonWrapper.classList.contains("hidden"));
+  }
+
   const rStatus = report.status || "passed";
+  if (auditBar) {
+    const recCheck = (report.checks && report.checks.reconciliation) || {};
+    const compCheck = (report.checks && report.checks.completeness) || {};
+    const spDelivery = report.upload_blocked
+      ? '<span class="text-rose-300 font-semibold">Blocked (.xlsx held)</span>'
+      : report.upload_performed
+        ? '<span class="text-emerald-300 font-semibold">Excel (.xlsx) Only &middot; JSON in UI</span>'
+        : '<span class="text-slate-300 font-semibold">Local Stage Only</span>';
+    const windowText = report.start_date && report.end_date
+      ? `${escapeHtml(report.start_date)} &rarr; ${escapeHtml(report.end_date)}`
+      : escapeHtml(report.file_prefix || "-");
+    auditBar.classList.remove("hidden");
+    auditBar.innerHTML = `
+      <div><span class="text-slate-500 block text-[10px]">Batch Window</span><span class="text-slate-200 font-mono">${windowText}</span></div>
+      <div><span class="text-slate-500 block text-[10px]">SharePoint Payload</span>${spDelivery}</div>
+      <div><span class="text-slate-500 block text-[10px]">Financial Totals</span><span class="text-slate-200 font-mono">Theo ${Number(recCheck.revenue_theoretical || 0).toLocaleString()} &middot; Gross ${Number(recCheck.revenue_gross || 0).toLocaleString()}</span></div>
+      <div><span class="text-slate-500 block text-[10px]">Row Ceiling Check</span><span class="text-slate-200 font-mono">Max ${Number(compCheck.max_export_rows || 0).toLocaleString()} / 100,000</span></div>
+    `;
+  }
   if (rStatus === "failed" || report.upload_blocked) {
     setBannerTheme(
       "bg-rose-950/35 border-rose-500/60 shadow-lg shadow-rose-950/30",
@@ -1482,8 +1543,8 @@ function renderResultBanner(job) {
           <i class="fa-solid fa-triangle-exclamation"></i>
           <span>Extraction Finished with ${warnCount} Soft Warning(s) &mdash; Delivered with Advisory</span>
         </div>
-        <p>${escapeHtml(report.summary || "Data uploaded to SharePoint with soft advisory notes logged in _validation_report.json.")}</p>
-        <p class="text-[11px] text-amber-200/80">Delivered to SharePoint folder: <strong>${escapeHtml(targetFolder)}</strong> (including audit report).</p>
+        <p>${escapeHtml(report.summary || "Excel reports uploaded to SharePoint; soft advisory notes kept in the UI Validation Report.")}</p>
+        <p class="text-[11px] text-amber-200/80">Delivered to SharePoint folder: <strong>${escapeHtml(targetFolder)}</strong> (.xlsx files only &mdash; validation JSON kept in UI).</p>
       `;
     } else if (job.validation_enabled === false || (report && report.status === "bypassed")) {
       banner.className = "p-4 rounded-xl border text-xs bg-slate-800/80 border-amber-500/40 text-slate-200 space-y-1";

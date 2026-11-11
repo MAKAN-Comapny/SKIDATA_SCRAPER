@@ -559,15 +559,21 @@
                   </p>
                 </div>
               </div>
-              <div id="valReportActions" class="flex items-center gap-2 shrink-0">
-                <button id="valToggleJsonBtn" type="button" class="hidden text-[11px] px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition font-mono">
-                  <i class="fa-solid fa-code mr-1 text-brand-400"></i>_validation_report.json
+              <div id="valReportActions" class="flex items-center flex-wrap gap-2 shrink-0">
+                <button id="valDownloadJsonBtn" type="button" class="hidden text-[11px] px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 transition font-medium">
+                  <i class="fa-solid fa-download mr-1"></i>Download JSON
                 </button>
                 <button id="valCopyJsonBtn" type="button" class="hidden text-[11px] px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition">
                   <i class="fa-regular fa-copy mr-1"></i>Copy JSON
                 </button>
+                <button id="valToggleJsonBtn" type="button" class="hidden text-[11px] px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition font-mono">
+                  <i class="fa-solid fa-code mr-1 text-brand-400"></i>Hide JSON
+                </button>
               </div>
             </div>
+
+            <!-- Structured Audit Summary Strip -->
+            <div id="valAuditMetaBar" class="hidden grid grid-cols-2 lg:grid-cols-4 gap-2 px-3 py-2 rounded-lg bg-slate-950/70 border border-slate-800/80 text-[11px]"></div>
 
             <!-- 4 Tier Component Mini-Cards -->
             <div id="valComponentGrid" class="hidden grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-xs">
@@ -614,14 +620,17 @@
             <div id="valSoftWarningsBox" class="hidden p-3 rounded-lg bg-amber-950/40 border border-amber-500/50 space-y-1.5">
               <div class="text-xs font-bold text-amber-300 flex items-center gap-2">
                 <i class="fa-solid fa-triangle-exclamation"></i>
-                <span>Soft Warnings &mdash; Advisory Findings Logged to SharePoint Report</span>
+                <span>Soft Warnings &mdash; Advisory Findings (Audit Report Kept in UI)</span>
               </div>
               <ul id="valSoftWarningsList" class="space-y-1 text-[11px] text-amber-100 font-mono"></ul>
             </div>
 
-            <!-- Raw Validation Report JSON Drawer -->
-            <div id="valJsonWrapper" class="hidden">
-              <pre id="valJsonPre" class="max-h-72 overflow-auto p-3 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-cyan-300 font-mono leading-relaxed"></pre>
+            <!-- Inline Validation Report JSON Viewer (Not Sent to SharePoint) -->
+            <div id="valJsonWrapper" class="hidden rounded-lg border border-slate-800 bg-slate-950/90 overflow-hidden">
+              <div class="flex items-center justify-between px-3 py-1.5 bg-slate-900/90 border-b border-slate-800 text-[10px] text-slate-400 font-mono">
+                <span><i class="fa-solid fa-file-code text-brand-400 mr-1.5"></i>Validation Audit Report (_validation_report.json &mdash; UI only, SharePoint stays Excel-only)</span>
+              </div>
+              <pre id="valJsonPre" class="max-h-64 overflow-auto p-3 text-[11px] text-cyan-300 font-mono leading-relaxed"></pre>
             </div>
           </div>
         </div>

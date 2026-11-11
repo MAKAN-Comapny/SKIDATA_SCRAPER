@@ -157,9 +157,6 @@ def main(target_folder: str | None = None, source_dir: str | None = None):
         return
 
     files = sorted(glob.glob(os.path.join(source, "*.xlsx")))
-    report_file = os.path.join(source, "_validation_report.json")
-    if os.path.isfile(report_file):
-        files.append(report_file)
     if not files:
         print(f"Notice: No .xlsx files found in '{source}' to upload.")
         return
