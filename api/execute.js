@@ -203,9 +203,11 @@ module.exports = async function handler(req, res) {
   }
 
   // Build GitHub Actions input parameters with clean target_folder
+  const validateEnabled = payload.validate !== false;
   const ghInputs = {
     mode: payload.mode === "daily" ? "daily" : "historical",
-    target_folder: payload.target_folder || "Validated_Docs/old"
+    target_folder: payload.target_folder || "Validated_Docs/old",
+    validate: validateEnabled ? "true" : "false"
   };
 
   if (payload.merge_option) {
@@ -246,7 +248,7 @@ module.exports = async function handler(req, res) {
 
     return res.status(200).json({
       ok: true,
-      message: `Workflow dispatched successfully to branch '${TARGET_BRANCH}'. Target SharePoint: '${ghInputs.target_folder}'. File Structure: '${ghInputs.merge_option || 'default'}'.`,
+      message: `Workflow dispatched successfully to branch '${TARGET_BRANCH}'. Target SharePoint: '${ghInputs.target_folder}'. File Structure: '${ghInputs.merge_option || 'default'}'. Validation Gate: '${validateEnabled ? "ACTIVE" : "BYPASSED"}'.`,
       inputs: ghInputs,
       dispatched_at: new Date().toISOString()
     });

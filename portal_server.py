@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from opa_engine import OPAPolicyEngine
 from queue_lock import QueueLockManager, JobStatus
@@ -63,6 +63,8 @@ class FolderVerifyRequest(BaseModel):
 
 
 class ExecutionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     mode: str  # 'daily', 'months', 'range', 'single_date'
     target_folder: str = "Validated_Docs/old"
     years: Optional[List[int]] = None
@@ -70,6 +72,8 @@ class ExecutionRequest(BaseModel):
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     target_date: Optional[str] = None
+    merge_option: Optional[str] = "separate"
+    validate_data: bool = Field(default=True, alias="validate")
 
 
 # --- Authentication Dependency ---
@@ -182,7 +186,7 @@ def verify_folder(req: FolderVerifyRequest, authenticated: bool = Depends(verify
 
 @app.post("/api/execute")
 def execute_extraction(req: ExecutionRequest, authenticated: bool = Depends(verify_auth_token)):
-    payload = req.model_dump()
+    payload = req.model_dump(by_alias=True)
     payload["authenticated"] = True
     payload["target_folder"] = _parse_folder_input(req.target_folder)
     payload["operation"] = "export"
@@ -212,6 +216,11 @@ def execute_extraction(req: ExecutionRequest, authenticated: bool = Depends(veri
 
 @app.get("/api/job/status")
 def get_job_status(authenticated: bool = Depends(verify_auth_token)):
+    return queue_mgr.get_state()
+
+
+@app.get("/api/status")
+def get_status_compat():
     return queue_mgr.get_state()
 
 

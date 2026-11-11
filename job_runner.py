@@ -6,6 +6,7 @@ Tracks progress, live steps, and component states for the visual architecture di
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import subprocess
@@ -70,7 +71,24 @@ class JobRunner:
                 raise ValueError(f"Unknown execution mode: {mode}")
 
         except Exception as e:
-            self.queue_mgr.fail_job(str(e))
+            report = self._read_validation_report()
+            self.queue_mgr.fail_job(str(e), validation_report=report)
+
+    def _read_validation_report(self) -> Optional[Dict[str, Any]]:
+        path = os.path.join(self.base_dir, "_validation_report.json")
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except Exception:
+            return None
+
+    def _backfill_validate_flag(self, payload: Dict[str, Any]) -> Tuple[List[str], Dict[str, str]]:
+        validate_enabled = payload.get("validate", True) is not False
+        extra_args = [] if validate_enabled else ["--no-validate"]
+        extra_env = {"VALIDATE_DATA": "true" if validate_enabled else "false"}
+        return extra_args, extra_env
 
     def _execute_daily(self, target_folder: str):
         """Execute daily rolling 5-day scraper."""
@@ -123,14 +141,17 @@ class JobRunner:
                     progress=int(15 + (task_idx / total_tasks) * 75),
                 )
 
+                extra_args, extra_env = self._backfill_validate_flag(payload)
                 cmd = [
                     self.python_exe,
                     "main_backfill.py",
                     "--month", f"{month} {year}",
                     "--folder", sub_folder,
+                    *extra_args,
                     "--headless",
                 ]
                 env = os.environ.copy()
+                env.update(extra_env)
                 env["TARGET_FOLDER_PATH_BACKFILL"] = sub_folder
 
                 success, summary = self._run_subprocess_stream(cmd, env, context=batch_name)
@@ -142,18 +163,26 @@ class JobRunner:
                 })
 
                 if not success:
-                    # Report partial month error (e.g. month data not in portal)
+                    # Report partial month error (e.g. validation gate blocked or portal failure)
                     err_msg = summary.get("error", "Unknown error")
                     self.queue_mgr.update_job(
                         log_message=f"Notice: Batch {batch_name} did not complete: {err_msg}",
                     )
+
+        report = self._read_validation_report()
+        if any(not r["success"] for r in all_results):
+            failed_msgs = "; ".join(
+                f"{r['batch']}: {r['summary'].get('error', 'failed')}"
+                for r in all_results if not r["success"]
+            )
+            raise RuntimeError(failed_msgs)
 
         self.queue_mgr.complete_job({
             "mode": "months",
             "batches_processed": task_idx,
             "results": all_results,
             "target_folder": target_folder,
-        })
+        }, validation_report=report)
 
     def _execute_range(self, payload: Dict[str, Any], target_folder: str):
         """Execute custom date range backfill."""
@@ -167,26 +196,30 @@ class JobRunner:
             progress=20,
         )
 
+        extra_args, extra_env = self._backfill_validate_flag(payload)
         cmd = [
             self.python_exe,
             "main_backfill.py",
             "--range", range_spec,
             "--folder", target_folder,
+            *extra_args,
             "--headless",
         ]
         env = os.environ.copy()
+        env.update(extra_env)
         env["TARGET_FOLDER_PATH_BACKFILL"] = target_folder
 
         success, summary = self._run_subprocess_stream(cmd, env, context=f"Range {range_spec}")
+        report = self._read_validation_report()
         if success:
             self.queue_mgr.complete_job({
                 "mode": "range",
                 "range": range_spec,
                 "folder": target_folder,
                 "summary": summary,
-            })
+            }, validation_report=report)
         else:
-            raise RuntimeError(summary.get("error", "Range backfill failed."))
+            raise RuntimeError((report or {}).get("summary") or summary.get("error", "Range backfill failed."))
 
     def _execute_single_date(self, payload: Dict[str, Any], target_folder: str):
         """Execute single historic date backfill."""
@@ -199,26 +232,30 @@ class JobRunner:
             progress=20,
         )
 
+        extra_args, extra_env = self._backfill_validate_flag(payload)
         cmd = [
             self.python_exe,
             "main_backfill.py",
             "--range", range_spec,
             "--folder", target_folder,
+            *extra_args,
             "--headless",
         ]
         env = os.environ.copy()
+        env.update(extra_env)
         env["TARGET_FOLDER_PATH_BACKFILL"] = target_folder
 
         success, summary = self._run_subprocess_stream(cmd, env, context=f"Date {target_d}")
+        report = self._read_validation_report()
         if success:
             self.queue_mgr.complete_job({
                 "mode": "single_date",
                 "date": target_d,
                 "folder": target_folder,
                 "summary": summary,
-            })
+            }, validation_report=report)
         else:
-            raise RuntimeError(summary.get("error", f"Single date extraction for {target_d} failed."))
+            raise RuntimeError((report or {}).get("summary") or summary.get("error", f"Single date extraction for {target_d} failed."))
 
     def _run_subprocess_stream(self, cmd: List[str], env: Dict[str, str], context: str) -> Tuple[bool, Dict[str, Any]]:
         """Run subprocess, stream stdout to queue logs, and track node updates."""
@@ -268,8 +305,11 @@ class JobRunner:
                     elif "SUCCESS: Saved" in line or "completed" in line:
                         self.queue_mgr.update_job(table_update=("Parking Transactions", "done"))
 
-                elif "Uploading to SharePoint" in line or "Step 4/4" in line:
-                    self.queue_mgr.update_job(active_node="destination_upload", progress=90)
+                elif "VALIDATION GATE" in line:
+                    self.queue_mgr.update_job(active_node="validation_gate", progress=92)
+
+                elif "Uploading to SharePoint" in line or "Uploading validated files" in line or "Step 4/4" in line:
+                    self.queue_mgr.update_job(active_node="destination_upload", progress=95)
 
                 # Track error lines
                 if "error" in line.lower() or "traceback" in line.lower() or "exception" in line.lower():

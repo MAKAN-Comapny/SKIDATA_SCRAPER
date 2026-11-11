@@ -16,9 +16,13 @@ let isDispatching = false;
 let activeJobStatus = "idle";
 let lastDispatchedAt = 0;
 let pendingModalCallback = null;
+let validationEnabled = sessionStorage.getItem("skidata_validation_enabled") !== "false";
+let latestValidationReport = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   initAuth();
+  initValidationToggle();
+  initValidationReportDrawer();
   initTabs();
   initMonthsGrid();
   initHistModeSwitch();
@@ -26,6 +30,101 @@ document.addEventListener("DOMContentLoaded", () => {
   initFileStructureModal();
   initJobActions();
 });
+
+// ================= 0. VALIDATION GATE SWITCH & AUDIT DRAWER =================
+function initValidationToggle() {
+  const toggleBtn = document.getElementById("validationGateToggle");
+  updateValidationToggleUI();
+  if (!toggleBtn) return;
+
+  toggleBtn.addEventListener("click", () => {
+    validationEnabled = !validationEnabled;
+    sessionStorage.setItem("skidata_validation_enabled", validationEnabled ? "true" : "false");
+    updateValidationToggleUI();
+    appendConsoleLog(
+      `[Validation Gate] Switched ${validationEnabled ? "ACTIVE (strict schema, calendar & financial checks ON)" : "OFF (fast bypass mode for time-constrained runs)"}.`
+    );
+  });
+}
+
+function updateValidationToggleUI() {
+  const toggleBtn = document.getElementById("validationGateToggle");
+  const dot = document.getElementById("validationDot");
+  const label = document.getElementById("validationLabel");
+  const track = document.getElementById("validationSwitchTrack");
+  const thumb = document.getElementById("validationSwitchThumb");
+  const runHint = document.getElementById("validationRunHint");
+
+  if (toggleBtn) {
+    toggleBtn.setAttribute("aria-checked", validationEnabled ? "true" : "false");
+    toggleBtn.className = validationEnabled
+      ? "flex items-center gap-2 text-xs bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-500/40 px-3 py-1.5 rounded-full transition-all duration-200 cursor-pointer"
+      : "flex items-center gap-2 text-xs bg-amber-950/60 hover:bg-amber-900/60 border border-amber-500/50 px-3 py-1.5 rounded-full transition-all duration-200 cursor-pointer";
+  }
+  if (dot) {
+    dot.className = validationEnabled
+      ? "w-2 h-2 rounded-full bg-emerald-400 animate-pulse"
+      : "w-2 h-2 rounded-full bg-amber-400";
+  }
+  if (label) {
+    label.textContent = validationEnabled ? "Validation Gate: Active" : "Validation Gate: Off";
+    label.className = validationEnabled ? "text-emerald-200 font-medium" : "text-amber-200 font-medium";
+  }
+  if (track && thumb) {
+    track.className = validationEnabled
+      ? "ml-1 inline-flex items-center w-8 h-4 rounded-full bg-emerald-500/80 p-0.5 transition-colors"
+      : "ml-1 inline-flex items-center w-8 h-4 rounded-full bg-slate-600 p-0.5 transition-colors";
+    thumb.className = validationEnabled
+      ? "w-3 h-3 rounded-full bg-white shadow transform translate-x-4 transition-transform"
+      : "w-3 h-3 rounded-full bg-slate-200 shadow transform translate-x-0 transition-transform";
+  }
+  if (runHint) {
+    runHint.className = validationEnabled
+      ? "text-[11px] text-emerald-400 font-medium flex items-center gap-1.5"
+      : "text-[11px] text-amber-400 font-medium flex items-center gap-1.5";
+    runHint.innerHTML = validationEnabled
+      ? '<i class="fa-solid fa-shield-halved"></i><span>Validation Gate Active: Calendar completeness, XML cell types, revenue balance &amp; anomalies verified before upload.</span>'
+      : '<i class="fa-solid fa-bolt"></i><span>Validation Gate OFF (Time-Constraint Bypass): Direct upload mode — data quality &amp; financial checks skipped.</span>';
+  }
+
+  if (activeJobStatus === "idle") {
+    const nodeVal = document.getElementById("node_validation");
+    if (nodeVal) {
+      nodeVal.className = validationEnabled
+        ? "diagram-node flex-1 p-4 rounded-xl state-idle text-center shadow-md"
+        : "diagram-node flex-1 p-4 rounded-xl state-bypassed text-center shadow-md";
+      const pill = nodeVal.querySelector(".node-pill");
+      if (pill) pill.textContent = validationEnabled ? "Armed" : "Off";
+    }
+    renderValidationReport(null);
+  }
+}
+
+function initValidationReportDrawer() {
+  const toggleBtn = document.getElementById("valToggleJsonBtn");
+  const copyBtn = document.getElementById("valCopyJsonBtn");
+  const wrapper = document.getElementById("valJsonWrapper");
+
+  if (toggleBtn && wrapper) {
+    toggleBtn.addEventListener("click", () => {
+      wrapper.classList.toggle("hidden");
+    });
+  }
+  if (copyBtn) {
+    copyBtn.addEventListener("click", async () => {
+      if (!latestValidationReport) return;
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(latestValidationReport, null, 2));
+        copyBtn.innerHTML = '<i class="fa-solid fa-check text-emerald-400 mr-1"></i>Copied';
+        setTimeout(() => {
+          copyBtn.innerHTML = '<i class="fa-regular fa-copy mr-1"></i>Copy JSON';
+        }, 1600);
+      } catch {
+        // Fallback silently if clipboard permission unavailable
+      }
+    });
+  }
+}
 
 // ================= 1. AUTHENTICATION =================
 function initAuth() {
@@ -630,10 +729,13 @@ function initJobActions() {
 async function triggerExecution(payload) {
   if (isWorkflowBusy()) return;
 
-  // Clear previous result banner
+  payload.validate = validationEnabled;
+
+  // Clear previous result banner and reset validation drawer
   const banner = document.getElementById("executionResultBanner");
   banner.className = "hidden p-4 rounded-xl border text-xs";
   banner.innerHTML = "";
+  renderValidationReport(null, { pending: true, enabled: validationEnabled });
 
   isDispatching = true;
   lastDispatchedAt = Date.now();
@@ -651,12 +753,17 @@ async function triggerExecution(payload) {
   livePulse.classList.remove("hidden");
   livePulse.classList.add("inline-flex");
 
-  appendConsoleLog(`[System] Initializing ${payload.mode} extraction request (File Structure: ${payload.merge_option || 'default'})...`);
+  appendConsoleLog(
+    `[System] Initializing ${payload.mode} extraction request (File Structure: ${payload.merge_option || 'default'}, Validation Gate: ${validationEnabled ? 'ACTIVE' : 'OFF/BYPASSED'})...`
+  );
 
   try {
+    const headers = { "Content-Type": "application/json" };
+    if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+
     const res = await fetch("/api/execute", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(payload)
     });
 
@@ -718,7 +825,9 @@ async function pollJobStatus() {
   if (!authToken) return;
 
   try {
-    const res = await fetch("/api/status");
+    const headers = {};
+    if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+    const res = await fetch("/api/status", { headers });
     if (!res.ok) return;
 
     const job = await res.json();
@@ -759,22 +868,30 @@ function renderJobState(job) {
     livePulse.classList.add("hidden");
     livePulse.classList.remove("inline-flex");
     resetDiagramNodes();
+    renderValidationReport(null);
     restoreWorkflowButtons();
     return;
   }
 
-  const isRunning = (job.status === "running" || job.status === "queued");
   queueBadge.textContent = `Queue: ${job.status.toUpperCase()}`;
-  
+
   if (job.status === "completed") {
-    durationBadge.innerHTML = `<i class="fa-solid fa-circle-check text-emerald-400 mr-1"></i> Run #${job.run_number || job.id || 1} Completed &bull; 100%`;
+    const hasWarn = job.validation_report && job.validation_report.status === "warning";
+    durationBadge.innerHTML = hasWarn
+      ? `<i class="fa-solid fa-triangle-exclamation text-amber-400 mr-1"></i> Run #${job.run_number || job.id || 1} Completed (Warnings) &bull; 100%`
+      : `<i class="fa-solid fa-circle-check text-emerald-400 mr-1"></i> Run #${job.run_number || job.id || 1} Completed &bull; 100%`;
     progressBar.style.width = "100%";
-    progressBar.className = "h-full bg-emerald-500 rounded-full transition-all duration-500";
+    progressBar.className = hasWarn
+      ? "h-full bg-amber-500 rounded-full transition-all duration-500"
+      : "h-full bg-emerald-500 rounded-full transition-all duration-500";
     livePulse.classList.add("hidden");
     livePulse.classList.remove("inline-flex");
     restoreWorkflowButtons();
   } else if (job.status === "failed") {
-    durationBadge.innerHTML = `<i class="fa-solid fa-circle-xmark text-rose-400 mr-1"></i> Run #${job.run_number || job.id || 1} Failed`;
+    const blocked = Boolean(job.validation_report && job.validation_report.upload_blocked);
+    durationBadge.innerHTML = blocked
+      ? `<i class="fa-solid fa-ban text-rose-400 mr-1"></i> Run #${job.run_number || job.id || 1} Upload Blocked by Validation`
+      : `<i class="fa-solid fa-circle-xmark text-rose-400 mr-1"></i> Run #${job.run_number || job.id || 1} Failed`;
     progressBar.style.width = "100%";
     progressBar.className = "h-full bg-rose-500 rounded-full transition-all duration-500";
     livePulse.classList.add("hidden");
@@ -792,8 +909,9 @@ function renderJobState(job) {
   // Update Diagram Nodes and Animated Arrows
   updateDiagramColors(job);
 
-  // Update 4 Core Table Status Badges
-  updateTableBadges(job.tables_status);
+  // Update 4 Core Table Status Badges + Validation Gate Report
+  updateTableBadges(job.tables_status, job.table_details, job.validation_report);
+  renderValidationReport(job);
 
   // Update Logs Console
   if (job.logs && job.logs.length > 0) {
@@ -804,31 +922,92 @@ function renderJobState(job) {
   renderResultBanner(job);
 }
 
-function updateTableBadges(tablesStatus) {
-  if (!tablesStatus) return;
+const TABLE_BADGE_MAP = [
+  { key: "Revenue in Depth", reportKey: "Revenue-In-Depth", id: "tblBadge_revenue" },
+  { key: "Access in Depth", reportKey: "Access-In-Depth", id: "tblBadge_access" },
+  { key: "System Event in Depth", reportKey: "System-Event-In-Depth", id: "tblBadge_system" },
+  { key: "Parking Transactions", reportKey: "Parking-Transactions", id: "tblBadge_parking" },
+];
 
-  const mapping = [
-    { key: "Revenue in Depth", id: "tblBadge_revenue" },
-    { key: "Access in Depth", id: "tblBadge_access" },
-    { key: "System Event in Depth", id: "tblBadge_system" },
-    { key: "Parking Transactions", id: "tblBadge_parking" },
-  ];
+const TABLE_STATUS_STYLES = {
+  downloading: {
+    html: '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Downloading',
+    chipClass: "status-chip text-[10px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse",
+    cardClass: "p-3 bg-slate-900 border border-amber-500/30 rounded-xl flex flex-col gap-1.5",
+    detailClass: "detail-chip text-[10px] text-amber-300/80 font-mono truncate",
+  },
+  done: {
+    html: '<i class="fa-solid fa-check mr-1"></i> Fetched',
+    chipClass: "status-chip text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-semibold",
+    cardClass: "p-3 bg-slate-900 border border-emerald-500/30 rounded-xl flex flex-col gap-1.5",
+    detailClass: "detail-chip text-[10px] text-emerald-300/80 font-mono truncate",
+  },
+  warning: {
+    html: '<i class="fa-solid fa-triangle-exclamation mr-1"></i> Warning',
+    chipClass: "status-chip text-[10px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-200 border border-amber-500/50 font-semibold",
+    cardClass: "p-3 bg-slate-900 border border-amber-500/50 rounded-xl flex flex-col gap-1.5",
+    detailClass: "detail-chip text-[10px] text-amber-300 font-mono truncate",
+  },
+  partial: {
+    html: '<i class="fa-solid fa-circle-half-stroke mr-1"></i> Partial Data',
+    chipClass: "status-chip text-[10px] px-2 py-0.5 rounded bg-rose-500/20 text-amber-200 border border-amber-500/60 font-bold",
+    cardClass: "p-3 bg-rose-950/25 border border-amber-500/60 rounded-xl flex flex-col gap-1.5",
+    detailClass: "detail-chip text-[10px] text-amber-200 font-mono truncate",
+  },
+  failed: {
+    html: '<i class="fa-solid fa-xmark mr-1"></i> Failed',
+    chipClass: "status-chip text-[10px] px-2 py-0.5 rounded bg-rose-500/25 text-rose-200 border border-rose-500/60 font-bold",
+    cardClass: "p-3 bg-rose-950/30 border border-rose-500/60 rounded-xl flex flex-col gap-1.5",
+    detailClass: "detail-chip text-[10px] text-rose-300 font-mono truncate",
+  },
+  skipped: {
+    html: 'Skipped',
+    chipClass: "status-chip text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700",
+    cardClass: "p-3 bg-slate-900 border border-slate-800 rounded-xl flex flex-col gap-1.5",
+    detailClass: "detail-chip text-[10px] text-slate-500 font-mono truncate",
+  },
+  pending: {
+    html: 'Pending',
+    chipClass: "status-chip text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400",
+    cardClass: "p-3 bg-slate-900 border border-slate-800 rounded-xl flex flex-col gap-1.5",
+    detailClass: "detail-chip text-[10px] text-slate-500 font-mono truncate",
+  },
+};
 
-  mapping.forEach(({ key, id }) => {
+function updateTableBadges(tablesStatus, tableDetails, validationReport) {
+  const detailsSrc = tableDetails || (validationReport && validationReport.tables) || {};
+
+  TABLE_BADGE_MAP.forEach(({ key, reportKey, id }) => {
     const el = document.getElementById(id);
     if (!el) return;
     const chip = el.querySelector(".status-chip");
-    const st = tablesStatus[key] || "pending";
+    const detailEl = el.querySelector(".detail-chip");
 
-    if (st === "downloading") {
-      chip.textContent = "Downloading...";
-      chip.className = "status-chip text-[10px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse";
-    } else if (st === "done") {
-      chip.innerHTML = '<i class="fa-solid fa-check mr-1"></i> Fetched';
-      chip.className = "status-chip text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-semibold";
-    } else {
-      chip.textContent = "Pending";
-      chip.className = "status-chip text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400";
+    const info = detailsSrc[key] || detailsSrc[reportKey] || null;
+    const st = (info && info.status) || (tablesStatus && tablesStatus[key]) || "pending";
+    const style = TABLE_STATUS_STYLES[st] || TABLE_STATUS_STYLES.pending;
+
+    el.className = style.cardClass;
+    if (chip) {
+      chip.innerHTML = style.html;
+      chip.className = style.chipClass;
+    }
+    if (detailEl) {
+      let note = "Awaiting validation...";
+      if (info && info.message) {
+        note = info.message;
+      } else if (info && typeof info.rows === "number") {
+        note = `${Number(info.rows).toLocaleString()} rows`;
+      } else if (st === "done") {
+        note = "Fetched & cleaned";
+      } else if (st === "downloading") {
+        note = "Extracting from SKIDATA...";
+      } else if (st === "failed") {
+        note = "Extraction or validation error";
+      }
+      detailEl.textContent = note;
+      detailEl.title = note;
+      detailEl.className = style.detailClass;
     }
   });
 }
@@ -837,36 +1016,73 @@ function updateDiagramColors(job) {
   const nodeSkidata = document.getElementById("node_skidata");
   const nodeScraper = document.getElementById("node_scraper");
   const nodeTables = document.getElementById("node_tables");
+  const nodeVal = document.getElementById("node_validation");
   const nodeDest = document.getElementById("node_destination");
   const arr1 = document.getElementById("arrow_1");
   const arr2 = document.getElementById("arrow_2");
   const arr3 = document.getElementById("arrow_3");
+  const arr4 = document.getElementById("arrow_4");
 
   resetDiagramNodes();
 
   const setNode = (el, pillText, state) => {
+    if (!el) return;
     el.className = `diagram-node flex-1 p-4 rounded-xl state-${state} text-center shadow-md`;
-    el.querySelector(".node-pill").textContent = pillText;
+    const pill = el.querySelector(".node-pill");
+    if (pill) pill.textContent = pillText;
+  };
+  const setArrow = (el, cls) => {
+    if (el) el.className = `diagram-arrow ${cls} text-xl px-1`;
   };
 
+  const report = job.validation_report || null;
+  const valBlocked = Boolean(report && report.upload_blocked);
+  const valBypassed = (job.validation_enabled === false) || (report && report.status === "bypassed");
+
   if (job.status === "failed") {
-    setNode(nodeScraper, "Failed", "failed");
-    setNode(nodeDest, "Aborted", "failed");
+    if (valBlocked || job.active_node === "validation_gate") {
+      setNode(nodeSkidata, "Connected", "completed");
+      setArrow(arr1, "arrow-done");
+      setNode(nodeScraper, "Completed", "completed");
+      setArrow(arr2, "arrow-done");
+      const hasPartial = Object.values(job.table_details || report?.tables || {}).some(t => t && t.status === "partial");
+      setNode(nodeTables, hasPartial ? "Partial Tables" : "4 Tables Staged", hasPartial ? "warning" : "completed");
+      setArrow(arr3, hasPartial ? "arrow-warning" : "arrow-done");
+      setNode(nodeVal, "BLOCKED", "failed");
+      setArrow(arr4, "arrow-failed");
+      setNode(nodeDest, "Upload Blocked", "failed");
+    } else {
+      setNode(nodeSkidata, "Connected", "completed");
+      setArrow(arr1, "arrow-done");
+      setNode(nodeScraper, "Failed", "failed");
+      setNode(nodeVal, valBypassed ? "Bypassed" : "Halted", valBypassed ? "bypassed" : "failed");
+      setArrow(arr4, "arrow-failed");
+      setNode(nodeDest, "Aborted", "failed");
+    }
     return;
   }
 
-  // When job is completed, ALL nodes and arrows are immediately set to completed!
   if (job.status === "completed") {
     setNode(nodeSkidata, "Connected", "completed");
-    arr1.className = "diagram-arrow arrow-done text-xl px-1";
-
+    setArrow(arr1, "arrow-done");
     setNode(nodeScraper, "Completed", "completed");
-    arr2.className = "diagram-arrow arrow-done text-xl px-1";
-
+    setArrow(arr2, "arrow-done");
     setNode(nodeTables, "All 4 Tables Ready", "completed");
-    arr3.className = "diagram-arrow arrow-done text-xl px-1";
+    setArrow(arr3, "arrow-done");
 
-    setNode(nodeDest, "Verified & Saved", "completed");
+    if (valBypassed) {
+      setNode(nodeVal, "Bypassed (Off)", "bypassed");
+      setArrow(arr4, "arrow-done");
+      setNode(nodeDest, "Uploaded (Fast)", "completed");
+    } else if (report && report.status === "warning") {
+      setNode(nodeVal, "Soft Warnings", "warning");
+      setArrow(arr4, "arrow-warning");
+      setNode(nodeDest, "Saved w/ Advisory", "completed");
+    } else {
+      setNode(nodeVal, "Verified", "completed");
+      setArrow(arr4, "arrow-done");
+      setNode(nodeDest, "Verified & Saved", "completed");
+    }
     return;
   }
 
@@ -876,19 +1092,24 @@ function updateDiagramColors(job) {
   // Node 1: SkiData Hub
   if (active === "skidata_auth") {
     setNode(nodeSkidata, "Authenticating...", "running");
-    arr1.className = "diagram-arrow arrow-active text-xl px-1";
+    setArrow(arr1, "arrow-active");
   } else if (completed.includes("skidata_auth") || active) {
     setNode(nodeSkidata, "Connected", "completed");
-    arr1.className = "diagram-arrow arrow-done text-xl px-1";
+    setArrow(arr1, "arrow-done");
   }
 
   // Node 2: Scraper Engine
   if (active === "scraper_engine") {
     setNode(nodeScraper, "Scraping Active", "running");
-    arr2.className = "diagram-arrow arrow-active text-xl px-1";
-  } else if (completed.includes("scraper_engine") || active.startsWith("table_") || active === "destination_upload") {
+    setArrow(arr2, "arrow-active");
+  } else if (
+    completed.includes("scraper_engine") ||
+    active.startsWith("table_") ||
+    active === "validation_gate" ||
+    active === "destination_upload"
+  ) {
     setNode(nodeScraper, "Completed", "completed");
-    arr2.className = "diagram-arrow arrow-done text-xl px-1";
+    setArrow(arr2, "arrow-done");
   }
 
   // Node 3: Tables Ingestion
@@ -900,55 +1121,398 @@ function updateDiagramColors(job) {
     else if (active === "table_parking") lbl = "Table 4/4 (Parking)";
 
     setNode(nodeTables, lbl, "running");
-    arr2.className = "diagram-arrow arrow-done text-xl px-1";
-    arr3.className = "diagram-arrow arrow-active text-xl px-1";
-  } else if (completed.includes("table_parking") || active === "destination_upload") {
+    setArrow(arr2, "arrow-done");
+    setArrow(arr3, "arrow-active");
+  } else if (
+    completed.includes("table_parking") ||
+    active === "validation_gate" ||
+    active === "destination_upload"
+  ) {
     setNode(nodeTables, "All 4 Tables Ready", "completed");
-    arr3.className = "diagram-arrow arrow-done text-xl px-1";
+    setArrow(arr3, "arrow-done");
   }
 
-  // Node 4: Destination Upload
+  // Node 4: Validation Gate
+  if (active === "validation_gate") {
+    setNode(nodeVal, "Validating...", "running");
+    setArrow(arr4, "arrow-active");
+  } else if (completed.includes("validation_gate") || active === "destination_upload") {
+    if (valBypassed) {
+      setNode(nodeVal, "Bypassed", "bypassed");
+    } else {
+      setNode(nodeVal, "Passed", "completed");
+    }
+    setArrow(arr4, "arrow-done");
+  } else if (valBypassed) {
+    setNode(nodeVal, "Off (Bypass)", "bypassed");
+  } else {
+    setNode(nodeVal, "Armed", "idle");
+  }
+
+  // Node 5: Destination Upload
   if (active === "destination_upload") {
     setNode(nodeDest, "Uploading...", "running");
-    arr3.className = "diagram-arrow arrow-active text-xl px-1";
+    setArrow(arr4, "arrow-active");
   }
 }
 
 function resetDiagramNodes() {
   document.querySelectorAll(".diagram-node").forEach(n => {
     n.className = "diagram-node flex-1 p-4 rounded-xl state-idle text-center shadow-md";
-    n.querySelector(".node-pill").textContent = "Idle";
+    const pill = n.querySelector(".node-pill");
+    if (pill) pill.textContent = (n.id === "node_validation") ? (validationEnabled ? "Armed" : "Off") : "Idle";
   });
   document.querySelectorAll(".diagram-arrow").forEach(a => {
     a.className = "diagram-arrow text-slate-600 text-xl px-1";
   });
+  if (!validationEnabled) {
+    const nodeVal = document.getElementById("node_validation");
+    if (nodeVal) nodeVal.className = "diagram-node flex-1 p-4 rounded-xl state-bypassed text-center shadow-md";
+  }
+}
+
+function setValidationCheckCard(cardId, status, detailText) {
+  const card = document.getElementById(cardId);
+  if (!card) return;
+  const badge = card.querySelector(".val-card-badge");
+  const detail = card.querySelector(".val-card-detail");
+
+  const cardThemes = {
+    passed: {
+      border: "border-emerald-500/35 bg-emerald-950/20",
+      badge: "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40",
+      label: "PASS",
+    },
+    warning: {
+      border: "border-amber-500/45 bg-amber-950/25",
+      badge: "bg-amber-500/20 text-amber-200 border border-amber-500/40",
+      label: "SOFT WARN",
+    },
+    failed: {
+      border: "border-rose-500/60 bg-rose-950/35",
+      badge: "bg-rose-500/25 text-rose-200 border border-rose-500/50",
+      label: "HARD FAIL",
+    },
+    bypassed: {
+      border: "border-slate-700 border-dashed bg-slate-900/60",
+      badge: "bg-slate-800 text-amber-300 border border-amber-500/30",
+      label: "BYPASSED",
+    },
+    skipped: {
+      border: "border-slate-800 bg-slate-950/80",
+      badge: "bg-slate-800 text-slate-400",
+      label: "SKIPPED",
+    },
+  };
+
+  const t = cardThemes[status] || cardThemes.skipped;
+  card.className = `p-2.5 rounded-lg border space-y-1 ${t.border}`;
+  if (badge) {
+    badge.className = `val-card-badge text-[9px] px-2 py-0.5 rounded uppercase font-mono font-semibold ${t.badge}`;
+    badge.textContent = t.label;
+  }
+  if (detail) {
+    detail.textContent = detailText || "-";
+    detail.title = detailText || "";
+  }
+}
+
+function renderFindingsList(boxId, listId, items, severity) {
+  const box = document.getElementById(boxId);
+  const list = document.getElementById(listId);
+  if (!box || !list) return;
+
+  if (!items || items.length === 0) {
+    box.classList.add("hidden");
+    list.innerHTML = "";
+    return;
+  }
+
+  const badgeCls = severity === "hard"
+    ? "px-1.5 py-0.5 rounded bg-rose-500/30 text-rose-200 border border-rose-500/40 text-[10px] font-bold"
+    : "px-1.5 py-0.5 rounded bg-amber-500/25 text-amber-200 border border-amber-500/40 text-[10px] font-bold";
+
+  list.innerHTML = items.map(item => `
+    <li class="flex items-start gap-2 leading-relaxed">
+      <span class="${badgeCls} shrink-0">${escapeHtml(item.code || "CHECK")}</span>
+      <span>${escapeHtml(item.message || "")}</span>
+    </li>
+  `).join("");
+  box.classList.remove("hidden");
+}
+
+function renderValidationReport(job, opts = {}) {
+  const card = document.getElementById("validationReportCard");
+  const iconEl = document.getElementById("valReportIcon");
+  const verdictEl = document.getElementById("valReportVerdictBadge");
+  const summaryEl = document.getElementById("valReportSummaryText");
+  const compGrid = document.getElementById("valComponentGrid");
+  const toggleBtn = document.getElementById("valToggleJsonBtn");
+  const copyBtn = document.getElementById("valCopyJsonBtn");
+  const jsonWrapper = document.getElementById("valJsonWrapper");
+  const jsonPre = document.getElementById("valJsonPre");
+
+  if (!card || !verdictEl || !summaryEl) return;
+
+  const setBannerTheme = (cardCls, iconCls, iconHtml, badgeCls, badgeText, summaryText) => {
+    card.className = `p-4 rounded-xl border space-y-3 transition-all duration-300 ${cardCls}`;
+    if (iconEl) {
+      iconEl.className = `w-7 h-7 rounded-lg flex items-center justify-center text-xs ${iconCls}`;
+      iconEl.innerHTML = iconHtml;
+    }
+    verdictEl.className = `text-[10px] px-2.5 py-0.5 rounded-full border font-semibold uppercase tracking-wide ${badgeCls}`;
+    verdictEl.textContent = badgeText;
+    summaryEl.textContent = summaryText;
+  };
+
+  const hideExtras = () => {
+    latestValidationReport = null;
+    if (compGrid) compGrid.classList.add("hidden");
+    if (toggleBtn) toggleBtn.classList.add("hidden");
+    if (copyBtn) copyBtn.classList.add("hidden");
+    if (jsonWrapper) jsonWrapper.classList.add("hidden");
+    renderFindingsList("valHardFailuresBox", "valHardFailuresList", [], "hard");
+    renderFindingsList("valSoftWarningsBox", "valSoftWarningsList", [], "soft");
+  };
+
+  if (!job || job.status === "idle") {
+    hideExtras();
+    const isEnabled = opts.enabled !== undefined ? opts.enabled : validationEnabled;
+    if (opts.pending) {
+      setBannerTheme(
+        "bg-slate-900/90 border-sky-500/40",
+        "bg-sky-500/15 text-sky-400",
+        '<i class="fa-solid fa-circle-notch fa-spin"></i>',
+        "bg-sky-500/15 text-sky-300 border-sky-500/30",
+        isEnabled ? "Queued & Armed" : "Queued (Gate Off)",
+        isEnabled
+          ? "Validation Gate is armed for this run. Checks execute automatically before SharePoint upload."
+          : "Validation Gate is switched OFF for this run (time-constraint bypass mode)."
+      );
+    } else if (isEnabled) {
+      setBannerTheme(
+        "bg-slate-900/90 border-slate-800",
+        "bg-emerald-500/15 text-emerald-400",
+        '<i class="fa-solid fa-shield-halved"></i>',
+        "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
+        "Armed & Active",
+        "Pre-upload audit validates full date coverage, Excel cell types, financial reconciliation & anomalies."
+      );
+    } else {
+      setBannerTheme(
+        "bg-amber-950/20 border-amber-500/40 border-dashed",
+        "bg-amber-500/15 text-amber-400",
+        '<i class="fa-solid fa-bolt"></i>',
+        "bg-amber-500/15 text-amber-300 border-amber-500/40",
+        "Off (Time-Constraint Bypass)",
+        "Validation Gate is turned OFF. Next launch will skip completeness, schema & financial verification checks."
+      );
+    }
+    return;
+  }
+
+  if (job.status === "running" || job.status === "queued") {
+    hideExtras();
+    const runEnabled = job.validation_enabled !== false;
+    setBannerTheme(
+      runEnabled ? "bg-slate-900/90 border-sky-500/40" : "bg-amber-950/20 border-amber-500/40 border-dashed",
+      runEnabled ? "bg-sky-500/15 text-sky-400" : "bg-amber-500/15 text-amber-400",
+      '<i class="fa-solid fa-shield-halved animate-pulse"></i>',
+      runEnabled ? "bg-sky-500/15 text-sky-300 border-sky-500/30" : "bg-amber-500/15 text-amber-300 border-amber-500/40",
+      runEnabled ? "Armed (Run In Progress)" : "Off (Bypassed Run)",
+      runEnabled
+        ? "Extracting & cleaning tables now. Full Validation Gate report will appear automatically once checks finish."
+        : "Validation Gate disabled for this run to prioritize download speed."
+    );
+    return;
+  }
+
+  const report = job.validation_report || null;
+  if (!report) {
+    hideExtras();
+    if (job.status === "failed") {
+      setBannerTheme(
+        "bg-rose-950/35 border-rose-500/50",
+        "bg-rose-500/20 text-rose-400",
+        '<i class="fa-solid fa-circle-exclamation"></i>',
+        "bg-rose-500/20 text-rose-200 border-rose-500/50",
+        "Caught Exception / Aborted",
+        job.error || "Pipeline stopped before Validation Gate produced _validation_report.json; SharePoint upload did not complete."
+      );
+      renderFindingsList(
+        "valHardFailuresBox",
+        "valHardFailuresList",
+        [{ code: "PIPELINE_EXCEPTION", message: job.error || "Job aborted with uncaught failure; SharePoint upload blocked." }],
+        "hard"
+      );
+    } else if (job.validation_enabled === false) {
+      setBannerTheme(
+        "bg-slate-900/90 border-amber-500/40 border-dashed",
+        "bg-amber-500/15 text-amber-400",
+        '<i class="fa-solid fa-bolt"></i>',
+        "bg-amber-500/20 text-amber-200 border-amber-500/40",
+        "Validation Bypassed (Off)",
+        "Run completed with Validation Gate turned OFF."
+      );
+    } else {
+      setBannerTheme(
+        "bg-slate-900/90 border-emerald-500/30",
+        "bg-emerald-500/15 text-emerald-400",
+        '<i class="fa-solid fa-circle-check"></i>',
+        "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
+        "Completed",
+        "Workflow completed successfully (no validation-report artifact attached for this run mode)."
+      );
+    }
+    return;
+  }
+
+  // Full structured _validation_report.json available
+  latestValidationReport = report;
+  if (jsonPre) jsonPre.textContent = JSON.stringify(report, null, 2);
+  if (toggleBtn) toggleBtn.classList.remove("hidden");
+  if (copyBtn) copyBtn.classList.remove("hidden");
+  if (compGrid) compGrid.classList.remove("hidden");
+
+  const rStatus = report.status || "passed";
+  if (rStatus === "failed" || report.upload_blocked) {
+    setBannerTheme(
+      "bg-rose-950/35 border-rose-500/60 shadow-lg shadow-rose-950/30",
+      "bg-rose-500/20 text-rose-400",
+      '<i class="fa-solid fa-ban"></i>',
+      "bg-rose-500/25 text-rose-200 border-rose-500/60",
+      "SharePoint Upload Blocked",
+      report.summary || "Critical data validation failure blocked SharePoint upload."
+    );
+  } else if (rStatus === "warning") {
+    setBannerTheme(
+      "bg-amber-950/25 border-amber-500/50",
+      "bg-amber-500/20 text-amber-300",
+      '<i class="fa-solid fa-triangle-exclamation"></i>',
+      "bg-amber-500/20 text-amber-200 border-amber-500/50",
+      "Passed With Soft Warnings",
+      report.summary || "Data uploaded cleanly with soft advisory warnings."
+    );
+  } else if (rStatus === "bypassed") {
+    setBannerTheme(
+      "bg-slate-900/90 border-amber-500/40 border-dashed",
+      "bg-amber-500/15 text-amber-400",
+      '<i class="fa-solid fa-bolt"></i>',
+      "bg-amber-500/20 text-amber-200 border-amber-500/40",
+      "Bypassed (Gate Off)",
+      report.summary || "Validation checks skipped by operator; files uploaded directly."
+    );
+  } else {
+    setBannerTheme(
+      "bg-emerald-950/20 border-emerald-500/45",
+      "bg-emerald-500/20 text-emerald-400",
+      '<i class="fa-solid fa-shield-halved"></i>',
+      "bg-emerald-500/20 text-emerald-200 border-emerald-500/40",
+      "Verified & Clean",
+      report.summary || "All completeness, Excel type, and financial reconciliation checks passed."
+    );
+  }
+
+  // Render 4 tier summary cards
+  const checks = report.checks || {};
+  const comp = checks.completeness || {};
+  const expD = comp.expected_days ?? 0;
+  const covD = comp.covered_days ?? 0;
+  const emptyCount = Array.isArray(comp.portal_empty_days) ? comp.portal_empty_days.length : 0;
+  const missCount = Array.isArray(comp.missing_days) ? comp.missing_days.length : 0;
+  const compTxt = rStatus === "bypassed"
+    ? "Bypassed"
+    : `${covD}/${expD} days · miss ${missCount}${emptyCount ? ` · empty ${emptyCount}` : ""}${comp.qlik_100k_risk ? " · 100k cap!" : ""}`;
+  setValidationCheckCard("valCard_completeness", comp.status || (rStatus === "bypassed" ? "bypassed" : "skipped"), compTxt);
+
+  const st = checks.structure_and_types || {};
+  const vc = st.violation_counts || {};
+  const totalTypeErr = (vc.barcodes || 0) + (vc.dates || 0) + (vc.durations || 0) + (vc.numbers || 0) + (vc.na_stripped || 0) + (vc.totals_left || 0);
+  const stTxt = rStatus === "bypassed"
+    ? "Bypassed"
+    : totalTypeErr > 0
+      ? `${totalTypeErr} XML/type violation(s)`
+      : `Clean XML · NA=${Number(st.na_count || 0).toLocaleString()}`;
+  setValidationCheckCard("valCard_schema", st.status || (rStatus === "bypassed" ? "bypassed" : "skipped"), stTxt);
+
+  const rec = checks.reconciliation || {};
+  const recTxt = rStatus === "bypassed"
+    ? "Bypassed"
+    : rec.status === "skipped"
+      ? "Skipped (single-table filter)"
+      : `Rev ${Number(rec.revenue_gross || 0).toLocaleString()} vs Pay ${Number(rec.parking_payment || 0).toLocaleString()} (${rec.revenue_diff_pct ?? 0}%)`;
+  setValidationCheckCard("valCard_reconciliation", rec.status || (rStatus === "bypassed" ? "bypassed" : "skipped"), recTxt);
+
+  const anom = checks.anomalies || {};
+  const anomTxt = rStatus === "bypassed"
+    ? "Bypassed"
+    : `Dup ${anom.duplicate_composite_rows || 0} · OOR ${anom.out_of_range_txn_dates_count || 0} · Exit<Entry ${anom.inverted_exit_lt_entry_count || 0}`;
+  setValidationCheckCard("valCard_anomalies", anom.status || (rStatus === "bypassed" ? "bypassed" : "skipped"), anomTxt);
+
+  // Render hard failures & soft warnings callouts
+  const hardList = Array.isArray(report.hard_failures) ? [...report.hard_failures] : [];
+  if ((rStatus === "failed" || job.status === "failed") && hardList.length === 0) {
+    hardList.push({
+      code: "EXCEPTION",
+      message: report.scrape_error || job.error || "Execution failed cleanly before upload.",
+    });
+  }
+  renderFindingsList("valHardFailuresBox", "valHardFailuresList", hardList, "hard");
+  renderFindingsList("valSoftWarningsBox", "valSoftWarningsList", report.soft_warnings || [], "soft");
 }
 
 function renderResultBanner(job) {
   const banner = document.getElementById("executionResultBanner");
   if (!banner) return;
 
+  const report = job.validation_report || null;
   if (job.status === "completed") {
     banner.classList.remove("hidden");
     const targetFolder = document.getElementById("diagDestFolderText").textContent || "Validated_Docs/old";
-    banner.className = "p-4 rounded-xl border text-xs bg-emerald-500/15 border-emerald-500/30 text-emerald-200 space-y-1";
-    banner.innerHTML = `
-      <div class="flex items-center gap-2 font-bold text-emerald-300 text-sm">
-        <i class="fa-solid fa-circle-check"></i>
-        <span>Extraction Finished Successfully!</span>
-      </div>
-      <p>All 4 core tables fetched: <strong>Revenue in Depth, Access in Depth, System Event in Depth, Parking Transactions</strong>.</p>
-      <p class="text-[11px] text-emerald-300/80">Delivered & verified in SharePoint folder: <strong>${escapeHtml(targetFolder)}</strong>.</p>
-    `;
+    if (report && report.status === "warning") {
+      const warnCount = (report.soft_warnings || []).length;
+      banner.className = "p-4 rounded-xl border text-xs bg-amber-500/15 border-amber-500/40 text-amber-100 space-y-1";
+      banner.innerHTML = `
+        <div class="flex items-center gap-2 font-bold text-amber-300 text-sm">
+          <i class="fa-solid fa-triangle-exclamation"></i>
+          <span>Extraction Finished with ${warnCount} Soft Warning(s) &mdash; Delivered with Advisory</span>
+        </div>
+        <p>${escapeHtml(report.summary || "Data uploaded to SharePoint with soft advisory notes logged in _validation_report.json.")}</p>
+        <p class="text-[11px] text-amber-200/80">Delivered to SharePoint folder: <strong>${escapeHtml(targetFolder)}</strong> (including audit report).</p>
+      `;
+    } else if (job.validation_enabled === false || (report && report.status === "bypassed")) {
+      banner.className = "p-4 rounded-xl border text-xs bg-slate-800/80 border-amber-500/40 text-slate-200 space-y-1";
+      banner.innerHTML = `
+        <div class="flex items-center gap-2 font-bold text-amber-300 text-sm">
+          <i class="fa-solid fa-bolt"></i>
+          <span>Extraction Completed (Validation Gate Off &mdash; Fast Bypass)</span>
+        </div>
+        <p>Files were uploaded without running the Validation Gate as requested by the header switch.</p>
+        <p class="text-[11px] text-slate-400">Delivered to SharePoint folder: <strong>${escapeHtml(targetFolder)}</strong>.</p>
+      `;
+    } else {
+      banner.className = "p-4 rounded-xl border text-xs bg-emerald-500/15 border-emerald-500/30 text-emerald-200 space-y-1";
+      banner.innerHTML = `
+        <div class="flex items-center gap-2 font-bold text-emerald-300 text-sm">
+          <i class="fa-solid fa-circle-check"></i>
+          <span>Extraction Finished &amp; Validated Successfully!</span>
+        </div>
+        <p>All 4 core tables verified cleanly: <strong>Revenue in Depth, Access in Depth, System Event in Depth, Parking Transactions</strong>.</p>
+        <p class="text-[11px] text-emerald-300/80">Delivered &amp; verified in SharePoint folder: <strong>${escapeHtml(targetFolder)}</strong>.</p>
+      `;
+    }
   } else if (job.status === "failed") {
     banner.classList.remove("hidden");
-    banner.className = "p-4 rounded-xl border text-xs bg-rose-500/15 border-rose-500/30 text-rose-200 space-y-1";
+    const blocked = Boolean(report && report.upload_blocked);
+    const hasPartial = Object.values(job.table_details || report?.tables || {}).some(t => t && t.status === "partial");
+    banner.className = "p-4 rounded-xl border text-xs bg-rose-500/15 border-rose-500/40 text-rose-200 space-y-1";
     banner.innerHTML = `
       <div class="flex items-center gap-2 font-bold text-rose-300 text-sm">
-        <i class="fa-solid fa-circle-xmark"></i>
-        <span>Workflow Notice</span>
+        <i class="fa-solid ${blocked ? "fa-ban" : "fa-circle-xmark"}"></i>
+        <span>${blocked ? "SharePoint Upload Blocked by Data Validation Gate" : "Workflow Halted / Caught Exception"}</span>
       </div>
-      <p class="font-mono">${escapeHtml(job.error || "Extraction did not complete or requested month was not found in SkiData.")}</p>
+      ${hasPartial ? '<p class="text-amber-300 font-semibold">Partial data detected — unsafe upload prevented to protect downstream reports.</p>' : ""}
+      <p class="font-mono">${escapeHtml(job.error || report?.summary || "Extraction did not complete cleanly.")}</p>
     `;
   } else {
     banner.classList.add("hidden");

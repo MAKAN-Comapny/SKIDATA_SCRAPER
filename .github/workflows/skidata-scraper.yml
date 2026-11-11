@@ -41,6 +41,14 @@ on:
           - separate
           - monthly
           - merged
+      validate:
+        description: "Run Data Validation Gate before SharePoint upload ('false' to bypass under time constraint)"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
   repository_dispatch:
     # Allows external triggers (e.g. cron-job.org) via GitHub API
     types: [manual-trigger]
@@ -84,6 +92,7 @@ jobs:
           TARGET_FOLDER_PATH_ODOO: "Ski Data 5"
           SKIP_ODOO_EXPORT: "true"
           MERGE_OPTION: ${{ inputs.merge_option || 'separate' }}
+          VALIDATE_DATA: ${{ inputs.validate || 'true' }}
           SKIDATA_URL: ${{ secrets.SKIDATA_URL }}
           SKIDATA_TENANT: ${{ secrets.SKIDATA_TENANT }}
           SKIDATA_LOGIN: ${{ secrets.SKIDATA_LOGIN }}
@@ -95,16 +104,22 @@ jobs:
         run: |
           TARGET_DIR="${{ inputs.target_folder || 'Validated_Docs/old' }}"
           MERGE_OPT="${{ inputs.merge_option || 'separate' }}"
+          VALIDATE_OPT="${{ inputs.validate || 'true' }}"
+          VALIDATE_FLAG=""
+          if [ "$VALIDATE_OPT" = "false" ]; then
+            VALIDATE_FLAG="--no-validate"
+          fi
           if [ "${{ inputs.mode }}" = "historical" ]; then
             echo "=========================================================="
             echo "RUNNING HISTORICAL / RANGE DATA SCRIPT"
             echo "Target SharePoint: $TARGET_DIR"
             echo "File Structure:    $MERGE_OPT"
+            echo "Validation Gate:   $VALIDATE_OPT"
             echo "=========================================================="
             if [ -n "${{ inputs.date_range }}" ]; then
-              python main_backfill.py --range "${{ inputs.date_range }}" --folder "$TARGET_DIR" --merge "$MERGE_OPT" --headless
+              python main_backfill.py --range "${{ inputs.date_range }}" --folder "$TARGET_DIR" --merge "$MERGE_OPT" $VALIDATE_FLAG --headless
             else
-              python main_backfill.py --month "${{ inputs.month || 'both' }}" --folder "$TARGET_DIR" --merge "$MERGE_OPT" --headless
+              python main_backfill.py --month "${{ inputs.month || 'both' }}" --folder "$TARGET_DIR" --merge "$MERGE_OPT" $VALIDATE_FLAG --headless
             fi
           else
             echo "=========================================================="
@@ -115,3 +130,12 @@ jobs:
             export MERGE_OPTION="$MERGE_OPT"
             python main.py
           fi
+
+      - name: Upload Validation Report Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-report
+          path: _validation_report.json
+          if-no-files-found: ignore
+          retention-days: 7
