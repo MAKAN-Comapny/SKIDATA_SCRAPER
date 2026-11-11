@@ -64,6 +64,7 @@ class QueueLockManager:
             "years": sorted(list(map(int, payload.get("years", [])))),
             "months": sorted(payload.get("months", [])),
             "target_folder": payload.get("target_folder", "").strip().lower(),
+            "validate": bool(payload.get("validate", True)),
         }
         serialized = json.dumps(relevant, sort_keys=True)
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
@@ -123,6 +124,9 @@ class QueueLockManager:
                     "System Event in Depth": "pending",
                     "Parking Transactions": "pending",
                 },
+                "table_details": None,
+                "validation_enabled": bool(payload.get("validate", True)),
+                "validation_report": None,
                 "result": None,
                 "error": None,
             }
@@ -135,6 +139,7 @@ class QueueLockManager:
         log_message: Optional[str] = None,
         progress: Optional[int] = None,
         table_update: Optional[Tuple[str, str]] = None,
+        validation_report: Optional[Dict[str, Any]] = None,
     ):
         """Update live execution progress for frontend diagram."""
         with self._lock:
@@ -158,9 +163,18 @@ class QueueLockManager:
                 if tbl_name in self.current_job["tables_status"]:
                     self.current_job["tables_status"][tbl_name] = tbl_state
 
+            if validation_report is not None:
+                self.current_job["validation_report"] = validation_report
+                self.current_job["validation_enabled"] = validation_report.get("validation_enabled", True)
+                if validation_report.get("tables"):
+                    self.current_job["table_details"] = validation_report["tables"]
+                    for k, info in validation_report["tables"].items():
+                        if k in self.current_job["tables_status"] and info.get("status"):
+                            self.current_job["tables_status"][k] = info["status"]
+
             self._save_state()
 
-    def complete_job(self, result_summary: Dict[str, Any]):
+    def complete_job(self, result_summary: Dict[str, Any], validation_report: Optional[Dict[str, Any]] = None):
         with self._lock:
             if not self.current_job:
                 return
@@ -169,6 +183,11 @@ class QueueLockManager:
             self.current_job["end_time"] = now
             self.current_job["progress_percent"] = 100
             self.current_job["result"] = result_summary
+            if validation_report is not None:
+                self.current_job["validation_report"] = validation_report
+                self.current_job["validation_enabled"] = validation_report.get("validation_enabled", True)
+                if validation_report.get("tables"):
+                    self.current_job["table_details"] = validation_report["tables"]
             if self.current_job.get("active_node"):
                 self.current_job["completed_nodes"].append(self.current_job["active_node"])
             self.current_job["active_node"] = "destination_upload"
@@ -176,7 +195,7 @@ class QueueLockManager:
             self.current_job["logs"].append(f"[{ts}] Job #{self.current_job['id']} completed successfully.")
             self._save_state()
 
-    def fail_job(self, error_message: str):
+    def fail_job(self, error_message: str, validation_report: Optional[Dict[str, Any]] = None):
         with self._lock:
             if not self.current_job:
                 return
@@ -184,6 +203,14 @@ class QueueLockManager:
             self.current_job["status"] = JobStatus.FAILED
             self.current_job["end_time"] = now
             self.current_job["error"] = error_message
+            if validation_report is not None:
+                self.current_job["validation_report"] = validation_report
+                self.current_job["validation_enabled"] = validation_report.get("validation_enabled", True)
+                if validation_report.get("tables"):
+                    self.current_job["table_details"] = validation_report["tables"]
+                    for k, info in validation_report["tables"].items():
+                        if k in self.current_job["tables_status"] and info.get("status"):
+                            self.current_job["tables_status"][k] = info["status"]
             ts = datetime.now().strftime("%H:%M:%S")
             self.current_job["logs"].append(f"[{ts}] ERROR: {error_message}")
             self._save_state()

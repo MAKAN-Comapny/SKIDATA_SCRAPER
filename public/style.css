@@ -46,6 +46,29 @@
   color: #ffffff;
 }
 
+.diagram-node.state-warning {
+  border-color: #f59e0b;
+  background-color: #451a03;
+  box-shadow: 0 0 15px rgba(245, 158, 11, 0.25);
+}
+
+.diagram-node.state-warning .node-pill {
+  background-color: #d97706;
+  color: #ffffff;
+}
+
+.diagram-node.state-bypassed {
+  border-color: #64748b;
+  border-style: dashed;
+  background-color: #0f172a;
+  opacity: 0.9;
+}
+
+.diagram-node.state-bypassed .node-pill {
+  background-color: #475569;
+  color: #e2e8f0;
+}
+
 /* Diagram Connecting Arrows */
 .diagram-arrow.arrow-active {
   color: #38bdf8;
@@ -54,6 +77,14 @@
 
 .diagram-arrow.arrow-done {
   color: #22c55e;
+}
+
+.diagram-arrow.arrow-warning {
+  color: #f59e0b;
+}
+
+.diagram-arrow.arrow-failed {
+  color: #f43f5e;
 }
 
 @keyframes arrowPulse {

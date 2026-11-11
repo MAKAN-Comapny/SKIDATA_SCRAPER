@@ -474,7 +474,7 @@ async def run_parking_transactions_flow(
     Because Qlik enforces a hard calculation limit (< 100,000 transactions) on this table,
     multi-day extractions iterate day-by-day and merge the rows into a consolidated workbook.
     """
-    import pandas as pd
+    from excel_merge import merge_parking_xlsx
     sheet_display_name = "Parking Transactions"
     file_base_name = "Parking-Transactions"
     header_selector = "header#VvpsUS_title"
@@ -556,10 +556,8 @@ async def run_parking_transactions_flow(
             prev_n = n
 
         print("Merging day files into consolidated Parking-Transactions...")
-        dfs = [pd.read_excel(f) for f in day_files]
-        merged_df = pd.concat(dfs, ignore_index=True)
-        merged_df.to_excel(target_path, index=False)
-        print(f"SUCCESS: Saved {len(merged_df)} total rows across {days_count} days to: {target_path}")
+        total_rows = merge_parking_xlsx(day_files, target_path)
+        print(f"SUCCESS: Saved {total_rows} total rows across {days_count} days to: {target_path}")
 
         for f in day_files:
             if os.path.exists(f):

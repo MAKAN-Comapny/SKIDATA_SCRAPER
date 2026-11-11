@@ -14,6 +14,7 @@ Outputs files formatted as:
 """
 import argparse
 import asyncio
+import json
 import os
 import sys
 import time
@@ -29,6 +30,8 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from validator_backfill import QLIK_ROW_LIMIT_WARNING, inspect_xlsx_summary
+
 load_dotenv()
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -39,6 +42,32 @@ LOGIN_URL_DEFAULT = (
 )
 
 EXPORTS_DIR = "exports_backfill"
+
+
+class PortalZeroDataError(RuntimeError):
+    """Raised when Qlik Date listbox confirms 0 entries exist for a date."""
+
+
+def _update_scrape_manifest(download_dir: str, updates: dict) -> None:
+    """Safely merge metadata into `<download_dir>/_scrape_manifest.json`."""
+    os.makedirs(download_dir, exist_ok=True)
+    path = os.path.join(download_dir, "_scrape_manifest.json")
+    existing: dict = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                existing = json.load(fh)
+        except Exception:
+            existing = {}
+    for k, v in updates.items():
+        if isinstance(v, dict) and isinstance(existing.get(k), dict):
+            existing[k].update(v)
+        else:
+            existing[k] = v
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(existing, fh, indent=2, default=str)
+    os.replace(tmp, path)
 
 
 def get_env(name: str, default: Optional[str] = None) -> str:
@@ -159,6 +188,7 @@ async def select_calendar_month_range(
     listbox_base: str,
     start_date: date,
     end_date: date,
+    observed_dates_out: Optional[set[date]] = None,
 ) -> int:
     """
     Scrolls through Qlik date listbox and selects every day between start_date and end_date (inclusive).
@@ -215,6 +245,9 @@ async def select_calendar_month_range(
             pass
         await asyncio.sleep(0.4)
 
+    if observed_dates_out is not None:
+        observed_dates_out.update(seen_dates)
+
     print(f"Selected {selected_count} day(s) for range {start_date} -> {end_date}.")
 
     # Confirm selection
@@ -240,9 +273,15 @@ async def run_in_depth_flow(
 ) -> None:
     """Open in-depth sheet, apply date filter, expand all, and export."""
     target_path = os.path.join(download_dir, f"{file_prefix}-{file_base_name}.xlsx")
-    if os.path.exists(target_path) and os.path.getsize(target_path) > 10_000:
-        print(f"Skipping {os.path.basename(target_path)} (already exists: {os.path.getsize(target_path):,} bytes).")
-        return
+    if os.path.exists(target_path):
+        cached = inspect_xlsx_summary(target_path)
+        if cached["readable"] and cached["row_count"] > 0:
+            print(
+                f"Skipping {os.path.basename(target_path)} "
+                f"(cached & verified: {cached['row_count']:,} rows, {cached['file_size']:,} bytes)."
+            )
+            return
+        print(f"Cached {os.path.basename(target_path)} invalid/empty ({cached['error']}); re-downloading...")
 
     await page.evaluate("window.scrollTo(0, 0)")
     try:
@@ -334,7 +373,16 @@ async def run_in_depth_flow(
         await download_link.click(force=True)
     download = await download_info.value
     await download.save_as(target_path)
-    print(f"Download complete: {target_path} ({os.path.getsize(target_path):,} bytes)")
+    summary = inspect_xlsx_summary(target_path)
+    if not summary["readable"] or summary["row_count"] == 0:
+        raise RuntimeError(
+            f"{file_base_name} download failed integrity check: {summary['error'] or '0 rows'}"
+        )
+    if summary["row_count"] >= QLIK_ROW_LIMIT_WARNING:
+        raise RuntimeError(
+            f"{file_base_name} hit Qlik 100k row cap ({summary['row_count']:,} rows); split date range."
+        )
+    print(f"Download complete: {target_path} ({summary['row_count']:,} rows, {os.path.getsize(target_path):,} bytes)")
 
 
 async def export_single_day_parking(
@@ -364,7 +412,16 @@ async def export_single_day_parking(
         raise RuntimeError(f"Date listbox not found for day {target_date}.")
 
     # 3. Select single date
-    await select_calendar_month_range(page, list_frame, listbox_base, target_date, target_date)
+    observed_dates: set[date] = set()
+    selected = await select_calendar_month_range(
+        page, list_frame, listbox_base, target_date, target_date, observed_dates_out=observed_dates
+    )
+    if selected == 0 and observed_dates:
+        oldest_seen, newest_seen = min(observed_dates), max(observed_dates)
+        if oldest_seen <= target_date <= newest_seen or target_date > oldest_seen:
+            raise PortalZeroDataError(
+                f"Qlik Date filter has 0 records for {target_date} (observed {oldest_seen}..{newest_seen})."
+            )
     await asyncio.sleep(2)
 
     # 4. Right click table header
@@ -424,12 +481,28 @@ async def run_parking_transactions_flow(
     file_prefix: str,
 ) -> None:
     """Open Parking Transactions sheet, apply date filter, and export data."""
-    import pandas as pd
+    from excel_merge import merge_parking_xlsx
 
     target_path = os.path.join(download_dir, f"{file_prefix}-Parking-Transactions.xlsx")
-    if os.path.exists(target_path) and os.path.getsize(target_path) > 10_000:
-        print(f"Skipping {os.path.basename(target_path)} (already exists: {os.path.getsize(target_path):,} bytes).")
-        return
+    if os.path.exists(target_path):
+        cached = inspect_xlsx_summary(target_path)
+        if cached["readable"] and cached["row_count"] > 0 and cached["row_count"] < QLIK_ROW_LIMIT_WARNING:
+            print(
+                f"Skipping {os.path.basename(target_path)} "
+                f"(cached & verified: {cached['row_count']:,} rows, {cached['file_size']:,} bytes)."
+            )
+            _update_scrape_manifest(download_dir, {
+                "parking": {
+                    "mode": "cached",
+                    "full_export_row_count": cached["row_count"],
+                    "portal_empty_dates": [],
+                    "failed_dates": {},
+                    "scraped_dates": [],
+                    "duplicate_chunks_detected": [],
+                }
+            })
+            return
+        print(f"Cached {os.path.basename(target_path)} invalid or near Qlik limit ({cached['error']}); re-downloading...")
 
     sheet_display_name = "Parking Transactions"
     header_selector = "header#VvpsUS_title"
@@ -510,19 +583,46 @@ async def run_parking_transactions_flow(
             await download_link.click(force=True)
         download = await download_info.value
         await download.save_as(target_path)
-        print(f"Parking Transactions single export complete: {target_path} ({os.path.getsize(target_path):,} bytes)")
+        full_info = inspect_xlsx_summary(target_path)
+        print(
+            f"Parking Transactions single export complete: {target_path} "
+            f"({full_info['row_count']:,} rows, {os.path.getsize(target_path):,} bytes)"
+        )
 
         # Close modal
         close_res = await find_element_across_all(page, ["button:has-text('Close')"])
         if close_res:
             c_btn, _ = close_res
             await c_btn.click(force=True)
-        return
+
+        if full_info["readable"] and 0 < full_info["row_count"] < QLIK_ROW_LIMIT_WARNING:
+            _update_scrape_manifest(download_dir, {
+                "parking": {
+                    "mode": "full_range",
+                    "full_export_row_count": full_info["row_count"],
+                    "portal_empty_dates": [],
+                    "failed_dates": {},
+                    "scraped_dates": [],
+                    "chunk_row_counts": {},
+                    "duplicate_chunks_detected": [],
+                }
+            })
+            return
+
+        print(
+            f"[WARNING] Full-range export invalid or reached Qlik 100k limit "
+            f"(readable={full_info['readable']}, rows={full_info['row_count']:,}). "
+            f"Falling back to day-by-day chunk extraction..."
+        )
+        try:
+            os.remove(target_path)
+        except OSError:
+            pass
 
     # If full month export didn't return a link in 90 seconds (Qlik 100k row limit reached), fallback to day-by-day:
     print("\n" + "!" * 65)
     print("Full-month single export timed out or exceeded Qlik calculation limit.")
-    print("Activating day-by-day extraction and consolidating with pandas...")
+    print("Activating day-by-day extraction and consolidating Excel files...")
     print("!" * 65)
 
     # Close any open export dialogs
@@ -537,38 +637,90 @@ async def run_parking_transactions_flow(
     total_days = (end_date - start_date).days + 1
     all_dates = [start_date + timedelta(days=i) for i in range(total_days)]
 
-    day_files = []
+    day_files: list[str] = []
+    seen_chunks: set[str] = set()
+    duplicate_chunks: list[str] = []
+    scraped_dates: list[str] = []
+    portal_empty_dates: list[str] = []
+    failed_dates: dict[str, str] = {}
+    chunk_row_counts: dict[str, int] = {}
+
     for idx, d in enumerate(all_dates, 1):
+        d_iso = d.strftime("%Y-%m-%d")
         day_str = d.strftime("%d-%b-%y")
         chunk_file = os.path.join(chunk_dir, f"{day_str}-Parking-Transactions.xlsx")
 
-        if os.path.exists(chunk_file) and os.path.getsize(chunk_file) > 10_000:
-            print(f"  [{idx}/{total_days}] Day {day_str} cached ({os.path.getsize(chunk_file):,} bytes).")
-            day_files.append(chunk_file)
+        if chunk_file in seen_chunks:
+            duplicate_chunks.append(os.path.basename(chunk_file))
             continue
+
+        if os.path.exists(chunk_file):
+            cached = inspect_xlsx_summary(chunk_file)
+            if cached["readable"] and 0 < cached["row_count"] < QLIK_ROW_LIMIT_WARNING:
+                print(
+                    f"  [{idx}/{total_days}] Day {day_str} cached & verified "
+                    f"({cached['row_count']:,} rows, {cached['file_size']:,} bytes)."
+                )
+                seen_chunks.add(chunk_file)
+                day_files.append(chunk_file)
+                scraped_dates.append(d_iso)
+                chunk_row_counts[d_iso] = cached["row_count"]
+                continue
+            print(f"  [{idx}/{total_days}] Cached {day_str} invalid/empty ({cached['error']}); re-fetching...")
 
         print(f"\n  [{idx}/{total_days}] Fetching day {day_str} ({d})...")
         for attempt in range(2):
             try:
                 await export_single_day_parking(page, d, chunk_file, header_selector)
+                chunk_info = inspect_xlsx_summary(chunk_file)
+                if not chunk_info["readable"] or chunk_info["row_count"] == 0:
+                    raise RuntimeError(f"Chunk unreadable or 0 rows ({chunk_info['error']})")
+                if chunk_info["row_count"] >= QLIK_ROW_LIMIT_WARNING:
+                    raise RuntimeError(
+                        f"Single-day chunk reached Qlik 100k row limit ({chunk_info['row_count']:,} rows)"
+                    )
+                seen_chunks.add(chunk_file)
                 day_files.append(chunk_file)
+                scraped_dates.append(d_iso)
+                chunk_row_counts[d_iso] = chunk_info["row_count"]
+                break
+            except PortalZeroDataError as zerr:
+                print(f"    [INFO] Day {day_str} has 0 records in Qlik portal (recording as portal empty): {zerr}")
+                portal_empty_dates.append(d_iso)
                 break
             except Exception as day_err:
                 if attempt == 1:
                     print(f"    [WARNING] Failed to fetch {day_str}: {day_err}")
+                    failed_dates[d_iso] = str(day_err)
                 else:
                     print(f"    Retry {day_str} in 2s...")
                     await asyncio.sleep(2)
 
-    valid_day_files = [f for f in day_files if os.path.exists(f) and os.path.getsize(f) > 10_000]
+    valid_day_files = [f for f in day_files if os.path.exists(f)]
+    if valid_day_files:
+        print(f"\nMerging {len(valid_day_files)} daily files into {target_path}...")
+        total_rows = merge_parking_xlsx(valid_day_files, target_path)
+        print(f"SUCCESS: Consolidated {total_rows:,} total rows to {target_path} ({os.path.getsize(target_path):,} bytes)!")
+
+    _update_scrape_manifest(download_dir, {
+        "parking": {
+            "mode": "daily_chunks",
+            "expected_dates": [d.strftime("%Y-%m-%d") for d in all_dates],
+            "scraped_dates": scraped_dates,
+            "portal_empty_dates": portal_empty_dates,
+            "failed_dates": failed_dates,
+            "chunk_row_counts": chunk_row_counts,
+            "duplicate_chunks_detected": duplicate_chunks,
+        }
+    })
+
     if not valid_day_files:
         raise RuntimeError(f"No daily parking transactions were extracted for range {start_date} -> {end_date}.")
-
-    print(f"\nMerging {len(valid_day_files)} daily files into {target_path}...")
-    dfs = [pd.read_excel(f) for f in valid_day_files]
-    merged_df = pd.concat(dfs, ignore_index=True)
-    merged_df.to_excel(target_path, index=False)
-    print(f"SUCCESS: Consolidated {len(merged_df):,} total rows to {target_path} ({os.path.getsize(target_path):,} bytes)!")
+    if failed_dates:
+        raise RuntimeError(
+            f"Incomplete Parking Transactions backfill: failed {len(failed_dates)}/{total_days} day(s): "
+            + ", ".join(sorted(failed_dates.keys())[:10])
+        )
 
 
 async def scrape_month(
@@ -652,76 +804,71 @@ async def scrape_month(
             await asyncio.sleep(5)
             return tab
 
-        # 1. Revenue In Depth
-        if sheet_filter in ("all", "revenue"):
+        _update_scrape_manifest(download_dir, {
+            "start_date": start_date.strftime("%Y-%m-%d"),
+            "end_date": end_date.strftime("%Y-%m-%d"),
+            "file_prefix": file_prefix,
+            "sheet_filter": sheet_filter,
+            "table_errors": {},
+        })
+
+        table_errors: dict[str, str] = {}
+        tasks = [
+            (
+                "revenue",
+                sheet_filter in ("all", "revenue"),
+                lambda t: run_in_depth_flow(
+                    t, download_dir, "Revenue in Depth Analysis", "Revenue-In-Depth",
+                    "header#CwPV_title", start_date, end_date, file_prefix,
+                ),
+            ),
+            (
+                "access",
+                sheet_filter in ("all", "access"),
+                lambda t: run_in_depth_flow(
+                    t, download_dir, "Access in Depth Analysis", "Access-In-Depth",
+                    "header#b8cfe7c0-f39f-45ce-8529-5edd3499c57b_title", start_date, end_date, file_prefix,
+                ),
+            ),
+            (
+                "events",
+                sheet_filter in ("all", "system_events", "events"),
+                lambda t: run_in_depth_flow(
+                    t, download_dir, "System Event in Depth Analysis", "System-Event-In-Depth",
+                    "header#jKmZn_title", start_date, end_date, file_prefix,
+                ),
+            ),
+            (
+                "parking",
+                sheet_filter in ("all", "parking", "transactions"),
+                lambda t: run_parking_transactions_flow(
+                    t, download_dir, start_date, end_date, file_prefix,
+                ),
+            ),
+        ]
+
+        for tbl_key, enabled, runner in tasks:
+            if not enabled:
+                continue
+            tab = None
             try:
                 tab = await open_reports_tab()
-                await run_in_depth_flow(
-                    tab, download_dir, "Revenue in Depth Analysis", "Revenue-In-Depth",
-                    "header#CwPV_title", start_date, end_date, file_prefix
-                )
-            except Exception as e:
-                print(f"[ERROR in Revenue In Depth]: {e}")
+                await runner(tab)
+            except Exception as exc:
+                print(f"[ERROR in {tbl_key}]: {exc}")
+                table_errors[tbl_key] = str(exc)
             finally:
-                try:
-                    await tab.close()
-                except Exception:
-                    pass
+                if tab is not None:
+                    try:
+                        await tab.close()
+                    except Exception:
+                        pass
                 await page.bring_to_front()
                 await asyncio.sleep(2)
 
-        # 2. Access In Depth
-        if sheet_filter in ("all", "access"):
-            try:
-                tab = await open_reports_tab()
-                await run_in_depth_flow(
-                    tab, download_dir, "Access in Depth Analysis", "Access-In-Depth",
-                    "header#b8cfe7c0-f39f-45ce-8529-5edd3499c57b_title", start_date, end_date, file_prefix
-                )
-            except Exception as e:
-                print(f"[ERROR in Access In Depth]: {e}")
-            finally:
-                try:
-                    await tab.close()
-                except Exception:
-                    pass
-                await page.bring_to_front()
-                await asyncio.sleep(2)
-
-        # 3. System Event In Depth
-        if sheet_filter in ("all", "system_events", "events"):
-            try:
-                tab = await open_reports_tab()
-                await run_in_depth_flow(
-                    tab, download_dir, "System Event in Depth Analysis", "System-Event-In-Depth",
-                    "header#jKmZn_title", start_date, end_date, file_prefix
-                )
-            except Exception as e:
-                print(f"[ERROR in System Event In Depth]: {e}")
-            finally:
-                try:
-                    await tab.close()
-                except Exception:
-                    pass
-                await page.bring_to_front()
-                await asyncio.sleep(2)
-
-        # 4. Parking Transactions
-        if sheet_filter in ("all", "parking", "transactions"):
-            try:
-                tab = await open_reports_tab()
-                await run_parking_transactions_flow(
-                    tab, download_dir, start_date, end_date, file_prefix
-                )
-            except Exception as e:
-                print(f"[ERROR in Parking Transactions]: {e}")
-            finally:
-                try:
-                    await tab.close()
-                except Exception:
-                    pass
-                await page.bring_to_front()
-                await asyncio.sleep(2)
-
+        _update_scrape_manifest(download_dir, {"table_errors": table_errors})
         await browser.close()
         print(f"\nFinished scraping {month_name}.")
+        if table_errors:
+            summary = "; ".join(f"{k}: {v}" for k, v in table_errors.items())
+            raise RuntimeError(f"Extraction failed for table(s) -> {summary}")

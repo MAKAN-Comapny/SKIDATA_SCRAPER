@@ -44,8 +44,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from scraper_backfill import scrape_month
-from Transformer_backfill import run as transform_backfill
+from Transformer_backfill import clean_backfill_directory
 from To_Sharepoint_backfill import main as upload_backfill
+from validator_backfill import (
+    merge_validation_reports,
+    validate_backfill_run,
+    write_validation_report,
+)
 
 MONTH_MAP = {
     "jan": 1, "january": 1,
@@ -163,51 +168,96 @@ def build_pipeline_specs(
     return specs
 
 
-def clean_and_stage(src_dir: str, dst_dir: str):
-    """Copies downloaded files and removes totals rows where applicable."""
-    import pandas as pd
-    import glob
-
-    os.makedirs(dst_dir, exist_ok=True)
-    # Only stage main month files, skip any internal daily chunk folder
-    all_files = [
-        f for f in glob.glob(os.path.join(src_dir, "*.xlsx"))
-        if os.path.isfile(f) and "daily_chunks" not in f
-    ]
-    print(f"\nCleaning and staging {len(all_files)} file(s) from {src_dir} -> {dst_dir}...")
-
-    for f in all_files:
-        dest_file = os.path.join(dst_dir, os.path.basename(f))
-        try:
-            if "Access-In-Depth" in f:
-                df = pd.read_excel(f)
-                df = df[df["Date"] != "Totals"].dropna(subset=["Date"])
-                df.to_excel(dest_file, index=False)
-            elif "Revenue-In-Depth" in f:
-                df = pd.read_excel(f, header=1)
-                df = df[df["Date"] != "Totals"].dropna(subset=["Date"])
-                df.to_excel(dest_file, index=False)
-            elif "System-Event-In-Depth" in f:
-                df = pd.read_excel(f)
-                df = df[df["Date"] != "Totals"].dropna(subset=["Date"])
-                df.to_excel(dest_file, index=False)
-            else:
-                shutil.copy2(f, dest_file)
-            print(f"  OK: {os.path.basename(dest_file)}")
-        except Exception as e:
-            print(f"  Copying without modification ({e}): {os.path.basename(f)}")
-            shutil.copy2(f, dest_file)
+def clean_and_stage(src_dir: str, dst_dir: str, strict: bool = True) -> dict:
+    """Clean downloaded files, capture pre-clean totals metadata, and stage into `dst_dir`."""
+    return clean_backfill_directory(src_dir, dst_dir, strict=strict)
 
 
-async def execute_month_pipeline(spec: dict, sheet_filter: str, headless: bool, no_upload: bool):
+def _print_validation_summary(report: dict) -> None:
+    """Print structured Validation Gate results to stdout for live logs."""
+    print("\n" + "-" * 65)
+    print(f"VALIDATION GATE [{report.get('status', 'unknown').upper()}] -> {report.get('summary')}")
+    chk = report.get("checks") or {}
+    comp = chk.get("completeness") or {}
+    recon = chk.get("reconciliation") or {}
+    struct = chk.get("structure_and_types") or {}
+    anom = chk.get("anomalies") or {}
+    if comp:
+        print(f"  Completeness : {comp.get('covered_days', 0)}/{comp.get('expected_days', 0)} days | max chunk={comp.get('max_export_rows', 0):,} rows")
+    if struct and struct.get("status") != "bypassed":
+        print(
+            f"  Excel Types  : barcodes_text={struct.get('barcodes_text_ok')}, "
+            f"dates_native={struct.get('dates_native_ok')}, durations_num={struct.get('durations_numeric_ok')}, "
+            f"numbers={struct.get('numbers_ok')}, N/A={struct.get('na_preserved_ok')} ({struct.get('na_count', 0):,})"
+        )
+    if recon and recon.get("status") not in ("skipped", "bypassed"):
+        print(
+            f"  Reconcile    : GrossRev={recon.get('revenue_gross', 0):,.2f} vs Payment={recon.get('parking_payment', 0):,.2f} "
+            f"({recon.get('revenue_diff_pct', 0):.2f}% diff) | Qty={recon.get('revenue_quantity', 0):,} vs Rows={recon.get('parking_rows', 0):,}"
+        )
+    if anom and anom.get("status") != "bypassed":
+        print(
+            f"  Anomalies    : dups={anom.get('duplicate_composite_rows', 0)}, "
+            f"Exit<Entry={anom.get('inverted_exit_lt_entry_count', 0)}, "
+            f"out_of_range={anom.get('out_of_range_txn_dates_count', 0)}"
+        )
+    for f in report.get("hard_failures") or []:
+        print(f"  [HARD FAIL] [{f.get('code')}] {f.get('message')}")
+    for w in report.get("soft_warnings") or []:
+        print(f"  [SOFT WARN] [{w.get('code')}] {w.get('message')}")
+    print("-" * 65)
+
+
+def _write_github_step_summary(report: dict) -> None:
+    """Append Markdown validation report into `$GITHUB_STEP_SUMMARY` when running in CI."""
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY", "").strip()
+    if not summary_path:
+        return
+    try:
+        lines = [
+            f"## SKIDATA Historical Backfill Validation Gate: `{report.get('status', '').upper()}`",
+            "",
+            f"**Summary:** {report.get('summary')}",
+            "",
+            "| Table | Status | Rows | Notes |",
+            "|---|---|---:|---|",
+        ]
+        for tname, tinfo in (report.get("tables") or {}).items():
+            lines.append(
+                f"| {tname} | `{tinfo.get('status')}` | {int(tinfo.get('rows', 0)):,} | {tinfo.get('message', '')} |"
+            )
+        if report.get("hard_failures"):
+            lines.extend(["", "### Hard Failures (Upload Blocked)"])
+            for f in report["hard_failures"]:
+                lines.append(f"- **`{f.get('code')}`**: {f.get('message')}")
+        if report.get("soft_warnings"):
+            lines.extend(["", "### Soft Warnings"])
+            for w in report["soft_warnings"]:
+                lines.append(f"- **`{w.get('code')}`**: {w.get('message')}")
+        lines.append("")
+        with open(summary_path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines))
+    except OSError:
+        pass
+
+
+async def execute_month_pipeline(
+    spec: dict,
+    sheet_filter: str,
+    headless: bool,
+    no_upload: bool,
+    validate: bool = True,
+) -> dict:
     print("\n" + "#" * 65)
     print(f"# STARTING PIPELINE: {spec['name'].upper()}")
     print(f"# SharePoint Target: {spec['sharepoint_folder']}")
+    print(f"# Validation Gate:   {'ENABLED (Strict Gate)' if validate else 'BYPASSED (Time-Constraint Mode)'}")
     print("#" * 65)
 
     os.makedirs(spec["local_exports"], exist_ok=True)
     os.makedirs(spec["local_cleaned"], exist_ok=True)
 
+    scrape_error: str | None = None
     try:
         # 1. Scrape from portal
         await scrape_month(
@@ -220,24 +270,64 @@ async def execute_month_pipeline(spec: dict, sheet_filter: str, headless: bool, 
             headless=headless,
         )
     except Exception as scrape_err:
-        print(f"\n[NOTICE] Scraping encountered an issue: {scrape_err}")
-    finally:
-        # 2. Clean and Stage downloaded files
-        clean_and_stage(spec["local_exports"], spec["local_cleaned"])
+        scrape_error = str(scrape_err)
+        print(f"\n[ERROR] Scraping encountered an issue: {scrape_error}")
 
-        # 3. Upload to SharePoint
-        if not no_upload:
-            print(f"\nUploading available files to SharePoint: {spec['sharepoint_folder']}...")
-            try:
-                upload_backfill(target_folder=spec["sharepoint_folder"], source_dir=spec["local_cleaned"])
-            except (Exception, SystemExit) as up_err:
-                print(f"SharePoint upload error: {up_err}")
-        else:
-            print(f"\nUpload skipped (--no-upload). Files saved locally in {spec['local_cleaned']}/")
+    # 2. Clean and Stage downloaded files (always capture meta & strip totals safely)
+    clean_meta = clean_and_stage(spec["local_exports"], spec["local_cleaned"], strict=validate)
+
+    # 3. Validation Gate (runs BEFORE SharePoint upload!)
+    report = validate_backfill_run(
+        spec=spec,
+        cleaned_dir=spec["local_cleaned"],
+        exports_dir=spec["local_exports"],
+        sheet_filter=sheet_filter,
+        validate_enabled=validate,
+        scrape_error=scrape_error,
+        clean_meta=clean_meta,
+    )
+    batch_report_path = os.path.join(spec["local_cleaned"], "_validation_report.json")
+    write_validation_report(report, [batch_report_path])
+    _print_validation_summary(report)
+
+    # 4. Gated SharePoint Upload
+    if report["upload_blocked"]:
+        print(
+            f"\n[BLOCKED] SharePoint upload to '{spec['sharepoint_folder']}' HALTED by Validation Gate."
+        )
+    elif not no_upload:
+        print(f"\nUploading validated files to SharePoint: {spec['sharepoint_folder']}...")
+        try:
+            upload_backfill(target_folder=spec["sharepoint_folder"], source_dir=spec["local_cleaned"])
+            report["upload_performed"] = True
+        except (Exception, SystemExit) as up_err:
+            err_msg = f"SharePoint upload error: {up_err}"
+            print(err_msg)
+            report["upload_performed"] = False
+            report.setdefault("hard_failures", []).append({
+                "code": "SHAREPOINT_UPLOAD_FAILED",
+                "severity": "hard",
+                "category": "upload",
+                "message": err_msg,
+                "details": {},
+            })
+            report["status"] = "failed"
+            report["summary"] = err_msg
+        write_validation_report(report, [batch_report_path])
+    else:
+        print(f"\nUpload skipped (--no-upload). Files saved locally in {spec['local_cleaned']}/")
 
     print("\n" + "=" * 65)
-    print(f"COMPLETED PIPELINE FOR {spec['name'].upper()}")
+    print(f"COMPLETED PIPELINE FOR {spec['name'].upper()} (Gate={report['status'].upper()})")
     print("=" * 65)
+    return report
+
+
+def _env_bool(name: str, default: bool = True) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() not in ("false", "0", "no", "off")
 
 
 def main():
@@ -276,7 +366,14 @@ def main():
     )
     parser.add_argument("--headless", action="store_true", default=False, help="Run browser in headless mode")
     parser.add_argument("--no-upload", action="store_true", default=False, help="Skip SharePoint upload")
+    parser.add_argument(
+        "--no-validate",
+        action="store_true",
+        default=not _env_bool("VALIDATE_DATA", True),
+        help="Bypass the Data Validation Gate for urgent runs",
+    )
     args = parser.parse_args()
+    validate_enabled = not args.no_validate
 
     # Build dynamic pipeline specifications
     specs_to_run = build_pipeline_specs(
@@ -287,21 +384,35 @@ def main():
 
     print("\n" + "=" * 65)
     print(f"HISTORICAL / RANGE BACKFILL INITIALIZED ({len(specs_to_run)} task(s))")
+    print(f"Validation Gate: {'ENABLED' if validate_enabled else 'BYPASSED (--no-validate)'}")
     for s in specs_to_run:
         print(f"  - {s['name']}: {s['start_date']} -> {s['end_date']}")
         print(f"    Prefix:     {s['file_prefix']}")
         print(f"    SharePoint: {s['sharepoint_folder']}")
     print("=" * 65)
 
+    batch_reports: list[dict] = []
     for spec in specs_to_run:
-        asyncio.run(
+        rep = asyncio.run(
             execute_month_pipeline(
                 spec=spec,
                 sheet_filter=args.sheet,
                 headless=args.headless,
                 no_upload=args.no_upload,
+                validate=validate_enabled,
             )
         )
+        batch_reports.append(rep)
+
+    merged_report = merge_validation_reports(batch_reports)
+    write_validation_report(merged_report, [os.path.join(os.getcwd(), "_validation_report.json")])
+    _write_github_step_summary(merged_report)
+
+    if merged_report.get("status") == "failed":
+        print("\n" + "!" * 65)
+        print(f"! VALIDATION GATE / PIPELINE FAILED: {merged_report.get('summary')}")
+        print("!" * 65)
+        raise SystemExit(1)
 
     print("\n" + "#" * 65)
     print("# ALL HISTORICAL / RANGE BACKFILL TASKS FINISHED SUCCESSFULLY!")

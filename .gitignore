@@ -16,6 +16,8 @@ exports/
 Cleaned-Exports/
 exports_sep_1_10/
 exports_backfill/
+Cleaned-Exports-Backfill/
+_validation_report.json
 
 # IDE
 .idea/
