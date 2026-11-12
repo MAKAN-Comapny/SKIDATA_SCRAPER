@@ -92,6 +92,89 @@ def _parse_row_date(text: str) -> Optional[date]:
         return None
 
 
+DOWNLOAD_LINK_SELECTORS = [
+    "a.export-url",
+    "a:has-text('download your data file')",
+    "a:has-text('Click here')",
+    "a[href*='tempcontent']",
+    ".lui-dialog a",
+]
+
+MODAL_EXPORT_BUTTON_SELECTORS = [
+    "button.lui-button:has-text('Export')",
+    "button:has-text('Export')",
+    ".lui-dialog button:has-text('Export')",
+    "button[title='Export']",
+    "span.lui-button__text:has-text('Export')",
+]
+
+
+async def _find_visible_element_across_all(page: Page, selectors: list[str]):
+    """Return the first visible element matching any selector across main page and all iframes."""
+    for root in [page] + list(page.frames):
+        for sel in selectors:
+            try:
+                elements = await root.query_selector_all(sel)
+                for el in elements:
+                    if await el.is_visible():
+                        return el, root
+            except Exception:
+                pass
+    return None
+
+
+async def _wait_for_visible_element_across_all(
+    page: Page,
+    selectors: list[str],
+    timeout_s: float = 120.0,
+    check_interval: float = 0.8,
+):
+    """Poll main page and all iframes until a visible matching element appears."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        found = await _find_visible_element_across_all(page, selectors)
+        if found is not None:
+            return found
+        await asyncio.sleep(check_interval)
+    return None
+
+
+async def _close_any_dialog(page: Page) -> None:
+    """Best-effort close of any open Qlik export/filter modal."""
+    for sel_group in (["button:has-text('Close')", "button:has-text('Cancel')"],):
+        found = await _find_visible_element_across_all(page, sel_group)
+        if found is not None:
+            btn, _ = found
+            try:
+                await btn.click(force=True)
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
+    try:
+        await page.keyboard.press("Escape")
+    except Exception:
+        pass
+
+
+async def _clear_qlik_selections(page: Page) -> None:
+    """Best-effort clear of active Qlik selections when recovering between attempts."""
+    for root in [page] + list(page.frames):
+        try:
+            for sel in [
+                "button[data-testid='actions-toolbar-clear']",
+                "button[title='Clear selection']",
+                "button[title='Clear all selections']",
+                "span.lui-icon--clear-selections",
+            ]:
+                for btn in await root.query_selector_all(sel):
+                    if await btn.is_visible() and await btn.is_enabled():
+                        await btn.click(force=True)
+                        await asyncio.sleep(0.6)
+                        return
+        except Exception:
+            pass
+
+
 async def _find_listbox_item_by_offset(
     list_frame: Frame,
     listbox_base: str,
@@ -424,8 +507,22 @@ async def _export_parking_single_day(
     header_selector: str,
 ) -> str:
     """Exports one day of Parking Transactions to avoid Qlik's 100,000 row calculation limit."""
-    # Deselect previous day if applicable
-    if prev_n is not None:
+    # Deselect any active days != n (Qlik floats selected rows to the top, plus prev_n fallback)
+    selected_items = await list_frame.query_selector_all(
+        f"{listbox_base}:has([role='row'][aria-selected='true'])"
+    )
+    deselected_prev = False
+    for sel_item in selected_items:
+        n_el = await sel_item.query_selector("div[data-n]")
+        sel_n = await n_el.get_attribute("data-n") if n_el else None
+        if sel_n != str(n):
+            await sel_item.scroll_into_view_if_needed()
+            await sel_item.click()
+            await asyncio.sleep(0.2)
+            if prev_n is not None and sel_n == str(prev_n):
+                deselected_prev = True
+
+    if prev_n is not None and not deselected_prev:
         prev_item = await _find_listbox_item_by_offset(list_frame, listbox_base, prev_n)
         if prev_item:
             row_el = await prev_item.query_selector('[role="row"]')
@@ -448,59 +545,108 @@ async def _export_parking_single_day(
 
     # Confirm selection
     confirm_button_selector = "button[data-testid='actions-toolbar-confirm'][title='Confirm selection']"
-    confirm_frame = await find_frame_with_selector(page, confirm_button_selector, total_timeout_ms=5_000)
+    confirm_frame = await find_frame_with_selector(
+        page, confirm_button_selector, per_frame_timeout_ms=2_000, total_timeout_ms=6_000
+    )
     if confirm_frame:
         await confirm_frame.click(confirm_button_selector)
+    else:
+        await page.keyboard.press("Escape")
     await asyncio.sleep(2)
 
     # Right click header
-    pivot_frame = await find_frame_with_selector(page, header_selector, total_timeout_ms=15_000)
+    pivot_frame = await find_frame_with_selector(
+        page, header_selector, per_frame_timeout_ms=2_000, total_timeout_ms=20_000
+    )
     if not pivot_frame:
         pivot_frame = await find_frame_with_selector(
-            page, "article:not(.qv-object-filterpane) header.qv-object-header", total_timeout_ms=15_000
+            page,
+            "article:not(.qv-object-filterpane) header.qv-object-header",
+            per_frame_timeout_ms=2_000,
+            total_timeout_ms=20_000,
         )
+    if not pivot_frame:
+        raise RuntimeError(f"Could not find Parking Transactions header for offset {n}")
+
     header_el = await pivot_frame.query_selector(header_selector)
     if not header_el:
         header_el = await pivot_frame.query_selector("article:not(.qv-object-filterpane) header.qv-object-header")
+    if not header_el:
+        raise RuntimeError(f"Parking Transactions header element missing for offset {n}")
+
     await header_el.scroll_into_view_if_needed()
     await header_el.click(button="right")
     await asyncio.sleep(0.5)
 
     # Download as -> Data
     export_group_selector = "li#export-group"
-    menu_frame = await find_frame_with_selector(page, export_group_selector, total_timeout_ms=10_000)
+    menu_frame = await find_frame_with_selector(
+        page, export_group_selector, per_frame_timeout_ms=2_000, total_timeout_ms=15_000
+    )
+    if not menu_frame:
+        raise RuntimeError(f"Context menu 'Download as...' not found for offset {n}")
     await menu_frame.click(export_group_selector)
     await asyncio.sleep(0.5)
 
     export_selector = "li#export"
-    export_item = await menu_frame.wait_for_selector(export_selector, timeout=10_000)
+    export_item = await menu_frame.wait_for_selector(export_selector, timeout=15_000)
     await export_item.click()
     await asyncio.sleep(1)
 
-    # Click export button
-    export_button_selector = "button.lui-button:has-text('Export')"
-    export_button_frame = await find_frame_with_selector(page, export_button_selector, total_timeout_ms=5_000)
-    btn = await export_button_frame.query_selector(export_button_selector)
-    await btn.click()
+    # Click modal Export button (visible element across page + all frames)
+    btn_res = await _wait_for_visible_element_across_all(
+        page, MODAL_EXPORT_BUTTON_SELECTORS, timeout_s=15.0, check_interval=0.4
+    )
+    if btn_res is not None:
+        btn, _ = btn_res
+        await btn.scroll_into_view_if_needed()
+        await btn.click(force=True)
+    else:
+        await page.keyboard.press("Enter")
 
-    # Wait for download link
-    export_link_selector = "a.export-url"
-    export_frame = await find_frame_with_selector(page, export_link_selector, total_timeout_ms=60_000)
-    if not export_frame:
+    # Wait for visible download link across page + all frames
+    link_res = await _wait_for_visible_element_across_all(
+        page, DOWNLOAD_LINK_SELECTORS, timeout_s=150.0, check_interval=0.8
+    )
+    if link_res is None:
         raise RuntimeError(f"Export link not found for Parking Transactions offset {n}")
+    download_link, _ = link_res
 
-    async with page.expect_download() as download_info:
-        await export_frame.click(export_link_selector)
+    async with page.expect_download(timeout=120_000) as download_info:
+        await download_link.click(force=True)
     download = await download_info.value
-
-    # Close modal
-    close_btn = await export_frame.query_selector("button:has-text('Close')")
-    if close_btn:
-        await close_btn.click()
 
     temp_path = os.path.join(download_dir, f"temp_parking_day_{n}.xlsx")
     await download.save_as(temp_path)
+    print(f"    Saved day offset {n}: {os.path.getsize(temp_path):,} bytes")
+
+    await _close_any_dialog(page)
+    await asyncio.sleep(0.8)
     return temp_path
+
+
+async def _open_date_listbox(page: Page, listbox_base: str, total_timeout_ms: int = 20_000) -> Frame:
+    """Open the Qlik Date filter popover and return the frame containing listbox items."""
+    date_filter_selector = "div[data-testid='collapsed-title-Date']"
+    date_frame = await find_frame_with_selector(
+        page, date_filter_selector, per_frame_timeout_ms=2_000, total_timeout_ms=total_timeout_ms
+    )
+    if date_frame is None:
+        date_filter_selector = "h6[aria-label='Date']"
+        date_frame = await find_frame_with_selector(
+            page, date_filter_selector, per_frame_timeout_ms=2_000, total_timeout_ms=total_timeout_ms
+        )
+    if date_frame is None:
+        raise RuntimeError("Could not find Date filter in any frame.")
+    await date_frame.click(date_filter_selector)
+    await asyncio.sleep(0.8)
+
+    list_frame = await find_frame_with_selector(
+        page, listbox_base, per_frame_timeout_ms=2_000, total_timeout_ms=total_timeout_ms
+    )
+    if list_frame is None:
+        raise RuntimeError("Date listbox items did not render in any frame.")
+    return list_frame
 
 
 async def run_parking_transactions_flow(
@@ -551,17 +697,7 @@ async def run_parking_transactions_flow(
 
     if days_count == 1:
         # Standard single day extraction
-        date_filter_selector = "div[data-testid='collapsed-title-Date']"
-        date_frame = await find_frame_with_selector(page, date_filter_selector)
-        if date_frame is None:
-            date_filter_selector = "h6[aria-label='Date']"
-            date_frame = await find_frame_with_selector(page, date_filter_selector)
-        if date_frame is None:
-            raise RuntimeError("Could not find Date filter in any frame.")
-        await date_frame.click(date_filter_selector)
-        await asyncio.sleep(0.8)
-
-        list_frame = await find_frame_with_selector(page, listbox_base)
+        list_frame = await _open_date_listbox(page, listbox_base, total_timeout_ms=60_000)
         single_temp = await _export_parking_single_day(
             page, list_frame, listbox_base, n=1, prev_n=None, download_dir=download_dir, header_selector=header_selector
         )
@@ -578,20 +714,26 @@ async def run_parking_transactions_flow(
 
         for n in range(1, days_count + 1):
             print(f"  Fetching day {n}/{days_count} (offset {n})...")
-            date_filter_selector = "div[data-testid='collapsed-title-Date']"
-            date_frame = await find_frame_with_selector(page, date_filter_selector, total_timeout_ms=15_000)
-            if not date_frame:
-                date_filter_selector = "h6[aria-label='Date']"
-                date_frame = await find_frame_with_selector(page, date_filter_selector, total_timeout_ms=15_000)
-            await date_frame.click(date_filter_selector)
-            await asyncio.sleep(0.8)
-
-            list_frame = await find_frame_with_selector(page, listbox_base, total_timeout_ms=15_000)
-            fp = await _export_parking_single_day(
-                page, list_frame, listbox_base, n=n, prev_n=prev_n, download_dir=download_dir, header_selector=header_selector
-            )
-            day_files.append(fp)
-            prev_n = n
+            last_exc: Optional[Exception] = None
+            for attempt in range(1, 4):
+                try:
+                    list_frame = await _open_date_listbox(page, listbox_base)
+                    fp = await _export_parking_single_day(
+                        page, list_frame, listbox_base, n=n, prev_n=prev_n, download_dir=download_dir, header_selector=header_selector
+                    )
+                    day_files.append(fp)
+                    prev_n = n
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    print(f"  [Attempt {attempt}/3] Offset {n} failed ({exc!r}); resetting Qlik dialogs/selections...")
+                    await _close_any_dialog(page)
+                    await _clear_qlik_selections(page)
+                    prev_n = None
+                    await asyncio.sleep(2)
+            if last_exc is not None:
+                raise last_exc
 
         print("Merging day files into consolidated Parking-Transactions...")
         total_rows = merge_parking_xlsx(day_files, target_path)

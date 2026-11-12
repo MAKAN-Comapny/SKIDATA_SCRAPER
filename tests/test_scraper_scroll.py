@@ -8,7 +8,32 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from scraper import _find_listbox_item_by_offset
+from scraper import _find_listbox_item_by_offset, _wait_for_visible_element_across_all
+
+
+class _FakeWidget:
+    def __init__(self, visible: bool):
+        self._visible = visible
+
+    async def is_visible(self) -> bool:
+        return self._visible
+
+
+class _FakeRoot:
+    def __init__(self, mapping: dict[str, list[_FakeWidget]]):
+        self._mapping = mapping
+
+    async def query_selector_all(self, selector: str):
+        return self._mapping.get(selector, [])
+
+
+class _FakePage:
+    def __init__(self, main_mapping: dict, frame_mappings: list[dict]):
+        self._main = _FakeRoot(main_mapping)
+        self.frames = [_FakeRoot(m) for m in frame_mappings]
+
+    async def query_selector_all(self, selector: str):
+        return await self._main.query_selector_all(selector)
 
 
 class _FakeItem:
@@ -79,6 +104,24 @@ class TestVirtualListboxScroll(unittest.IsolatedAsyncioTestCase):
         item = await _find_listbox_item_by_offset(frame, "div.RowColumn-barContainer", 99, max_scrolls=40)
         self.assertIsNone(item)
         self.assertLessEqual(frame.scroll_calls, 4)
+
+    async def test_skips_hidden_elements_and_finds_visible_across_frames(self):
+        hidden = _FakeWidget(visible=False)
+        visible_in_frame = _FakeWidget(visible=True)
+        page = _FakePage(
+            main_mapping={"a.export-url": [hidden]},
+            frame_mappings=[{}, {"a[href*='tempcontent']": [visible_in_frame]}],
+        )
+        res = await _wait_for_visible_element_across_all(
+            page,
+            ["a.export-url", "a[href*='tempcontent']"],
+            timeout_s=0.3,
+            check_interval=0.05,
+        )
+        self.assertIsNotNone(res)
+        el, root = res
+        self.assertIs(el, visible_in_frame)
+        self.assertIs(root, page.frames[1])
 
 
 if __name__ == "__main__":
