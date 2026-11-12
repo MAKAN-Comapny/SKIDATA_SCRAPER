@@ -175,11 +175,80 @@ async def _clear_qlik_selections(page: Page) -> None:
             pass
 
 
+async def _collect_visible_offsets(list_frame: Frame, listbox_base: str) -> tuple[list, list[str]]:
+    """Return rendered listbox items and their data-n/text tokens for progress detection."""
+    items = await list_frame.query_selector_all(listbox_base)
+    tokens: list[str] = []
+    for item in items:
+        try:
+            n_el = await item.query_selector("div[data-n]")
+            n_val = await n_el.get_attribute("data-n") if n_el else None
+            txt = (await item.inner_text()).strip().split()[0] if not n_val else f"n={n_val}"
+            tokens.append(txt)
+        except Exception:
+            continue
+    return items, tokens
+
+
+async def _scroll_listbox_down(
+    list_frame: Frame,
+    items: list,
+    page: Optional[Page] = None,
+) -> None:
+    """Scroll a virtualized Qlik listbox down using real scrollTop, mouse wheel, and fallback selectors."""
+    scrolled_by_dom = False
+    if items:
+        # Pick an item near the bottom visually (in case virtual DOM recycles node order)
+        target_item = items[-1]
+        try:
+            scrolled_by_dom = bool(
+                await target_item.evaluate(
+                    """el => {
+                        let p = el.parentElement;
+                        while (p) {
+                            const before = p.scrollTop;
+                            p.scrollTop = before + 320;
+                            if (p.scrollTop > before) return true;
+                            p = p.parentElement;
+                        }
+                        return false;
+                    }"""
+                )
+            )
+        except Exception:
+            pass
+
+        if not scrolled_by_dom:
+            try:
+                await target_item.scroll_into_view_if_needed()
+            except Exception:
+                pass
+
+        if page is not None:
+            try:
+                box = await items[len(items) // 2].bounding_box()
+                if box:
+                    await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                    await page.mouse.wheel(0, 450)
+            except Exception:
+                pass
+
+    if not scrolled_by_dom:
+        try:
+            await list_frame.eval_on_selector(
+                "div.RowColumn-scrollContainer, div.lui-virtual-scroll, div.lui-list, div[role='listbox']",
+                "el => el.scrollBy(0, 320)",
+            )
+        except Exception:
+            pass
+
+
 async def _find_listbox_item_by_offset(
     list_frame: Frame,
     listbox_base: str,
     offset_n: int,
     max_scrolls: int = 40,
+    page: Optional[Page] = None,
 ):
     """Locate a Qlik date listbox item by data-n offset, scrolling virtualized rows safely."""
     item_sel = f"{listbox_base}:has(div[data-n='{offset_n}'])"
@@ -187,54 +256,34 @@ async def _find_listbox_item_by_offset(
     if item is not None:
         return item
 
-    prev_tail: Optional[str] = None
+    prev_sig: Optional[tuple[str, ...]] = None
     stagnant = 0
+    last_tokens: list[str] = []
     for _ in range(max_scrolls):
-        items = await list_frame.query_selector_all(listbox_base)
-        if items:
-            try:
-                tail_text: Optional[str] = (await items[-1].inner_text()).strip()
-            except Exception:
-                tail_text = None
-
-            try:
-                await items[-1].scroll_into_view_if_needed()
-            except Exception:
-                pass
-            try:
-                await items[-1].evaluate(
-                    """el => {
-                        let p = el.parentElement;
-                        while (p && p.scrollHeight <= p.clientHeight) {
-                            p = p.parentElement;
-                        }
-                        if (p) p.scrollBy(0, 300);
-                    }"""
-                )
-            except Exception:
-                pass
-
-            if tail_text is not None and tail_text == prev_tail:
-                stagnant += 1
-                if stagnant >= 3:
-                    break
-            else:
-                stagnant = 0
-                prev_tail = tail_text
+        items, last_tokens = await _collect_visible_offsets(list_frame, listbox_base)
+        sig = tuple(last_tokens)
+        if sig and sig == prev_sig:
+            stagnant += 1
+            if page is not None and stagnant in (2, 4):
+                try:
+                    await page.keyboard.press("PageDown")
+                except Exception:
+                    pass
+            if stagnant >= 6:
+                break
         else:
-            try:
-                await list_frame.eval_on_selector(
-                    "div.RowColumn-scrollContainer, div.lui-virtual-scroll, div.lui-list, div[role='listbox']",
-                    "el => el.scrollBy(0, 300)",
-                )
-            except Exception:
-                pass
+            stagnant = 0
+            prev_sig = sig
 
-        await asyncio.sleep(0.35)
+        await _scroll_listbox_down(list_frame, items, page=page)
+        await asyncio.sleep(0.4)
+
         item = await list_frame.query_selector(item_sel)
         if item is not None:
             return item
 
+    if last_tokens:
+        print(f"Debug: Date listbox offsets visible when searching data-n={offset_n}: {last_tokens[:20]}")
     return None
 
 
@@ -297,7 +346,7 @@ async def select_report_date(
 
         selected_count = 0
         for n in range(start_offset, end_offset + 1):
-            row_item = await _find_listbox_item_by_offset(list_frame, listbox_base, n)
+            row_item = await _find_listbox_item_by_offset(list_frame, listbox_base, n, page=page)
 
             if row_item is not None:
                 # Capture the exact date of yesterday (data-n=1) for naming
@@ -523,7 +572,7 @@ async def _export_parking_single_day(
                 deselected_prev = True
 
     if prev_n is not None and not deselected_prev:
-        prev_item = await _find_listbox_item_by_offset(list_frame, listbox_base, prev_n)
+        prev_item = await _find_listbox_item_by_offset(list_frame, listbox_base, prev_n, page=page)
         if prev_item:
             row_el = await prev_item.query_selector('[role="row"]')
             if row_el and await row_el.get_attribute("aria-selected") == "true":
@@ -532,7 +581,7 @@ async def _export_parking_single_day(
                 await asyncio.sleep(0.2)
 
     # Select current day n
-    item = await _find_listbox_item_by_offset(list_frame, listbox_base, n)
+    item = await _find_listbox_item_by_offset(list_frame, listbox_base, n, page=page)
 
     if not item:
         raise RuntimeError(f"Parking Transactions date item data-n={n} not found.")

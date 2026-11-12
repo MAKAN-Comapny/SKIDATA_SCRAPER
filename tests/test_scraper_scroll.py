@@ -36,29 +36,73 @@ class _FakePage:
         return await self._main.query_selector_all(selector)
 
 
+class _FakeMouse:
+    def __init__(self, on_wheel):
+        self._on_wheel = on_wheel
+        self.wheel_calls = 0
+
+    async def move(self, _x: float, _y: float) -> None:
+        return None
+
+    async def wheel(self, _dx: float, dy: float) -> None:
+        self.wheel_calls += 1
+        if dy > 0:
+            self._on_wheel()
+
+
+class _FakeKeyboard:
+    async def press(self, _key: str) -> None:
+        return None
+
+
+class _FakeDataN:
+    def __init__(self, offset_n: int):
+        self._n = str(offset_n)
+
+    async def get_attribute(self, attr: str):
+        return self._n if attr == "data-n" else None
+
+
 class _FakeItem:
-    def __init__(self, offset_n: int, on_scroll):
+    def __init__(self, offset_n: int, on_scroll, allow_scroll_into_view: bool = True):
         self.offset_n = offset_n
         self._on_scroll = on_scroll
+        self._allow_scroll_into_view = allow_scroll_into_view
 
     async def inner_text(self) -> str:
         return f"11/{self.offset_n:02d}/2026"
 
-    async def scroll_into_view_if_needed(self) -> None:
-        self._on_scroll()
-
-    async def evaluate(self, _script: str) -> None:
+    async def query_selector(self, selector: str):
+        if selector == "div[data-n]":
+            return _FakeDataN(self.offset_n)
         return None
+
+    async def bounding_box(self):
+        return {"x": 100.0, "y": 200.0, "width": 120.0, "height": 28.0}
+
+    async def scroll_into_view_if_needed(self) -> None:
+        if self._allow_scroll_into_view:
+            self._on_scroll()
+
+    async def evaluate(self, _script: str) -> bool:
+        return False
 
 
 class _FakeListFrame:
     """Simulates a virtualized Qlik listbox where old DOM scroll selectors don't exist."""
 
-    def __init__(self, max_offset: int = 30, window_size: int = 10, fail_eval_selector: bool = True):
+    def __init__(
+        self,
+        max_offset: int = 30,
+        window_size: int = 10,
+        fail_eval_selector: bool = True,
+        allow_scroll_into_view: bool = True,
+    ):
         self.max_offset = max_offset
         self.window_size = window_size
         self.top_offset = 1
         self.fail_eval_selector = fail_eval_selector
+        self.allow_scroll_into_view = allow_scroll_into_view
         self.scroll_calls = 0
 
     def _advance(self) -> None:
@@ -73,11 +117,11 @@ class _FakeListFrame:
     async def query_selector(self, selector: str):
         for n in self._visible_offsets():
             if f"data-n='{n}'" in selector:
-                return _FakeItem(n, self._advance)
+                return _FakeItem(n, self._advance, self.allow_scroll_into_view)
         return None
 
     async def query_selector_all(self, _selector: str):
-        return [_FakeItem(n, self._advance) for n in self._visible_offsets()]
+        return [_FakeItem(n, self._advance, self.allow_scroll_into_view) for n in self._visible_offsets()]
 
     async def eval_on_selector(self, selector: str, _script: str):
         if self.fail_eval_selector:
@@ -92,18 +136,28 @@ class TestVirtualListboxScroll(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item.offset_n, 5)
         self.assertEqual(frame.scroll_calls, 0)
 
-    async def test_scrolls_to_day_15_and_beyond_without_old_selector(self):
-        frame = _FakeListFrame(max_offset=30, window_size=10, fail_eval_selector=True)
-        item = await _find_listbox_item_by_offset(frame, "div.RowColumn-barContainer", 15, max_scrolls=20)
+    async def test_scrolls_to_day_15_via_mouse_wheel_even_when_dom_scroll_is_noop(self):
+        frame = _FakeListFrame(
+            max_offset=30,
+            window_size=10,
+            fail_eval_selector=True,
+            allow_scroll_into_view=False,
+        )
+        page = _FakePage({}, [])
+        page.mouse = _FakeMouse(frame._advance)
+        page.keyboard = _FakeKeyboard()
+        item = await _find_listbox_item_by_offset(
+            frame, "div.RowColumn-barContainer", 15, max_scrolls=20, page=page
+        )
         self.assertIsNotNone(item)
         self.assertEqual(item.offset_n, 15)
-        self.assertGreater(frame.scroll_calls, 0)
+        self.assertGreater(page.mouse.wheel_calls, 0)
 
     async def test_stops_early_when_list_stagnates(self):
         frame = _FakeListFrame(max_offset=10, window_size=10, fail_eval_selector=True)
         item = await _find_listbox_item_by_offset(frame, "div.RowColumn-barContainer", 99, max_scrolls=40)
         self.assertIsNone(item)
-        self.assertLessEqual(frame.scroll_calls, 4)
+        self.assertLessEqual(frame.scroll_calls, 8)
 
     async def test_skips_hidden_elements_and_finds_visible_across_frames(self):
         hidden = _FakeWidget(visible=False)
