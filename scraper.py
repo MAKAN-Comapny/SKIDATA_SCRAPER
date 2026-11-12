@@ -92,6 +92,69 @@ def _parse_row_date(text: str) -> Optional[date]:
         return None
 
 
+async def _find_listbox_item_by_offset(
+    list_frame: Frame,
+    listbox_base: str,
+    offset_n: int,
+    max_scrolls: int = 40,
+):
+    """Locate a Qlik date listbox item by data-n offset, scrolling virtualized rows safely."""
+    item_sel = f"{listbox_base}:has(div[data-n='{offset_n}'])"
+    item = await list_frame.query_selector(item_sel)
+    if item is not None:
+        return item
+
+    prev_tail: Optional[str] = None
+    stagnant = 0
+    for _ in range(max_scrolls):
+        items = await list_frame.query_selector_all(listbox_base)
+        if items:
+            try:
+                tail_text: Optional[str] = (await items[-1].inner_text()).strip()
+            except Exception:
+                tail_text = None
+
+            try:
+                await items[-1].scroll_into_view_if_needed()
+            except Exception:
+                pass
+            try:
+                await items[-1].evaluate(
+                    """el => {
+                        let p = el.parentElement;
+                        while (p && p.scrollHeight <= p.clientHeight) {
+                            p = p.parentElement;
+                        }
+                        if (p) p.scrollBy(0, 300);
+                    }"""
+                )
+            except Exception:
+                pass
+
+            if tail_text is not None and tail_text == prev_tail:
+                stagnant += 1
+                if stagnant >= 3:
+                    break
+            else:
+                stagnant = 0
+                prev_tail = tail_text
+        else:
+            try:
+                await list_frame.eval_on_selector(
+                    "div.RowColumn-scrollContainer, div.lui-virtual-scroll, div.lui-list, div[role='listbox']",
+                    "el => el.scrollBy(0, 300)",
+                )
+            except Exception:
+                pass
+
+        await asyncio.sleep(0.35)
+        item = await list_frame.query_selector(item_sel)
+        if item is not None:
+            return item
+
+    return None
+
+
 async def select_report_date(
     list_frame: Frame, listbox_base: str, page: Page, confirm_required: bool
 ) -> date:
@@ -151,20 +214,7 @@ async def select_report_date(
 
         selected_count = 0
         for n in range(start_offset, end_offset + 1):
-            item_sel = f"{listbox_base}:has(div[data-n='{n}'])"
-            row_item = await list_frame.query_selector(item_sel)
-
-            # Virtual scroll fallback if item is not rendered yet in DOM
-            if row_item is None:
-                for _ in range(5):
-                    await list_frame.eval_on_selector(
-                        "div.RowColumn-scrollContainer, div.lui-virtual-scroll, div.lui-list",
-                        "el => el.scrollBy(0, 150)",
-                    )
-                    await asyncio.sleep(0.2)
-                    row_item = await list_frame.query_selector(item_sel)
-                    if row_item:
-                        break
+            row_item = await _find_listbox_item_by_offset(list_frame, listbox_base, n)
 
             if row_item is not None:
                 # Capture the exact date of yesterday (data-n=1) for naming
@@ -376,8 +426,7 @@ async def _export_parking_single_day(
     """Exports one day of Parking Transactions to avoid Qlik's 100,000 row calculation limit."""
     # Deselect previous day if applicable
     if prev_n is not None:
-        prev_sel = f"{listbox_base}:has(div[data-n='{prev_n}'])"
-        prev_item = await list_frame.query_selector(prev_sel)
+        prev_item = await _find_listbox_item_by_offset(list_frame, listbox_base, prev_n)
         if prev_item:
             row_el = await prev_item.query_selector('[role="row"]')
             if row_el and await row_el.get_attribute("aria-selected") == "true":
@@ -386,18 +435,7 @@ async def _export_parking_single_day(
                 await asyncio.sleep(0.2)
 
     # Select current day n
-    item_sel = f"{listbox_base}:has(div[data-n='{n}'])"
-    item = await list_frame.query_selector(item_sel)
-    if not item:
-        for _ in range(5):
-            await list_frame.eval_on_selector(
-                "div.RowColumn-scrollContainer, div.lui-virtual-scroll, div.lui-list",
-                "el => el.scrollBy(0, 150)",
-            )
-            await asyncio.sleep(0.2)
-            item = await list_frame.query_selector(item_sel)
-            if item:
-                break
+    item = await _find_listbox_item_by_offset(list_frame, listbox_base, n)
 
     if not item:
         raise RuntimeError(f"Parking Transactions date item data-n={n} not found.")
