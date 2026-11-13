@@ -287,13 +287,59 @@ async def _find_listbox_item_by_offset(
     return None
 
 
+async def determine_start_offset(
+    list_frame: Frame, listbox_base: str, expected_yesterday: date
+) -> tuple[int, Optional[date]]:
+    """
+    Determine whether to start at data-n=0 or data-n=1:
+    - If data-n=0 is yesterday (meaning today's partial data has not synced to SKIDATA yet), start at data-n=0.
+    - If data-n=0 is today (or newer than yesterday), start at data-n=1 (which is yesterday).
+    - If date parsing fails or data-n=0 is missing, fallback to 1.
+    Returns (start_offset, detected_reference_date).
+    """
+    item_0 = await list_frame.query_selector(f"{listbox_base}:has(div[data-n='0'])")
+    if item_0 is None:
+        return 1, expected_yesterday
+
+    date_0 = _parse_row_date(await item_0.inner_text())
+    if date_0 == expected_yesterday:
+        print(
+            f"Date list starts with yesterday ({date_0}) at data-n=0 "
+            f"(today's data not yet in SKIDATA). Starting at offset 0."
+        )
+        return 0, date_0
+
+    item_1 = await list_frame.query_selector(f"{listbox_base}:has(div[data-n='1'])")
+    date_1 = _parse_row_date(await item_1.inner_text()) if item_1 else None
+
+    if date_1 == expected_yesterday:
+        print(
+            f"Date list starts with today ({date_0}) at data-n=0. "
+            f"Yesterday ({date_1}) is at data-n=1. Starting at offset 1."
+        )
+        return 1, date_1
+
+    if date_0 is not None and date_0 <= expected_yesterday:
+        print(
+            f"Date at data-n=0 is {date_0} (<= expected yesterday {expected_yesterday}). "
+            f"Using offset 0 as latest available day."
+        )
+        return 0, date_0
+
+    print(
+        f"Notice: data-n=0 is {date_0}, data-n=1 is {date_1} (expected yesterday {expected_yesterday}). "
+        f"Defaulting to offset 1."
+    )
+    return 1, (date_1 or date_0 or expected_yesterday)
+
+
 async def select_report_date(
     list_frame: Frame, listbox_base: str, page: Page, confirm_required: bool
 ) -> date:
     """
     Select date(s) in the open Date filter list and return the reference date (yesterday).
     If TARGET_DATE is set: selects that specific single date.
-    Otherwise: selects a rolling window of DAYS_COUNT (default: 5 days, from data-n=1 to data-n=DAYS_COUNT).
+    Otherwise: selects a rolling window of DAYS_COUNT (from offset determined by whether today exists).
     """
     target = parse_target_date()
     expected_yesterday = (datetime.now() - timedelta(days=1)).date()
@@ -338,9 +384,13 @@ async def select_report_date(
         await row_item.click()
 
     else:
-        # Rolling multi-day window mode (default: past 5 days)
+        # Rolling multi-day window mode (default: past 5 or 15 days)
         days_count = parse_days_count()
-        start_offset = 1  # 1 = yesterday (0 = today)
+        start_offset, detected_date = await determine_start_offset(
+            list_frame, listbox_base, expected_yesterday
+        )
+        if detected_date is not None:
+            row_date = detected_date
         end_offset = start_offset + days_count - 1
         print(f"Selecting {days_count} day(s) range (data-n={start_offset} to data-n={end_offset})...")
 
@@ -349,7 +399,7 @@ async def select_report_date(
             row_item = await _find_listbox_item_by_offset(list_frame, listbox_base, n, page=page)
 
             if row_item is not None:
-                # Capture the exact date of yesterday (data-n=1) for naming
+                # Capture the exact reference date for naming
                 if n == start_offset:
                     parsed_d = _parse_row_date(await row_item.inner_text())
                     if parsed_d is not None:
@@ -676,6 +726,13 @@ async def _export_parking_single_day(
 
 async def _open_date_listbox(page: Page, listbox_base: str, total_timeout_ms: int = 20_000) -> Frame:
     """Open the Qlik Date filter popover and return the frame containing listbox items."""
+    # If listbox is already open and visible, return its frame directly
+    existing_frame = await find_frame_with_selector(
+        page, listbox_base, per_frame_timeout_ms=500, total_timeout_ms=1_000
+    )
+    if existing_frame is not None:
+        return existing_frame
+
     date_filter_selector = "div[data-testid='collapsed-title-Date']"
     date_frame = await find_frame_with_selector(
         page, date_filter_selector, per_frame_timeout_ms=2_000, total_timeout_ms=total_timeout_ms
@@ -747,8 +804,16 @@ async def run_parking_transactions_flow(
     if days_count == 1:
         # Standard single day extraction
         list_frame = await _open_date_listbox(page, listbox_base, total_timeout_ms=60_000)
+        start_offset = 1
+        if target_date is None:
+            start_offset, detected_date = await determine_start_offset(
+                list_frame, listbox_base, yesterday
+            )
+            if detected_date is not None:
+                date_prefix = detected_date.strftime("%d-%b-%y")
+                target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}.xlsx")
         single_temp = await _export_parking_single_day(
-            page, list_frame, listbox_base, n=1, prev_n=None, download_dir=download_dir, header_selector=header_selector
+            page, list_frame, listbox_base, n=start_offset, prev_n=None, download_dir=download_dir, header_selector=header_selector
         )
         if os.path.exists(target_path):
             os.remove(target_path)
@@ -761,8 +826,17 @@ async def run_parking_transactions_flow(
         day_files = []
         prev_n = None
 
-        for n in range(1, days_count + 1):
-            print(f"  Fetching day {n}/{days_count} (offset {n})...")
+        # Determine start_offset dynamically based on whether SKIDATA has synced today
+        list_frame = await _open_date_listbox(page, listbox_base, total_timeout_ms=60_000)
+        start_offset, detected_date = await determine_start_offset(
+            list_frame, listbox_base, yesterday
+        )
+        if detected_date is not None:
+            date_prefix = detected_date.strftime("%d-%b-%y")
+            target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}.xlsx")
+
+        for idx, n in enumerate(range(start_offset, start_offset + days_count), start=1):
+            print(f"  Fetching day {idx}/{days_count} (offset {n})...")
             last_exc: Optional[Exception] = None
             for attempt in range(1, 4):
                 try:

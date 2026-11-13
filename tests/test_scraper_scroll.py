@@ -8,7 +8,11 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from scraper import _find_listbox_item_by_offset, _wait_for_visible_element_across_all
+from scraper import (
+    _find_listbox_item_by_offset,
+    _wait_for_visible_element_across_all,
+    determine_start_offset,
+)
 
 
 class _FakeWidget:
@@ -176,6 +180,54 @@ class TestVirtualListboxScroll(unittest.IsolatedAsyncioTestCase):
         el, root = res
         self.assertIs(el, visible_in_frame)
         self.assertIs(root, page.frames[1])
+
+
+class _FakeDateItem:
+    def __init__(self, text: str):
+        self._text = text
+
+    async def inner_text(self) -> str:
+        return self._text
+
+
+class _FakeDateListFrame:
+    def __init__(self, mapping: dict[str, str]):
+        self._mapping = mapping
+
+    async def query_selector(self, selector: str):
+        for n_str, date_text in self._mapping.items():
+            if f"data-n='{n_str}'" in selector:
+                return _FakeDateItem(date_text)
+        return None
+
+
+class TestDetermineStartOffset(unittest.IsolatedAsyncioTestCase):
+    async def test_uses_offset_0_when_today_is_missing_and_0_is_yesterday(self):
+        from datetime import date
+        frame = _FakeDateListFrame({"0": "11/12/2026", "1": "11/11/2026"})
+        offset, detected_date = await determine_start_offset(
+            frame, "div.RowColumn-barContainer", date(2026, 11, 12)
+        )
+        self.assertEqual(offset, 0)
+        self.assertEqual(detected_date, date(2026, 11, 12))
+
+    async def test_uses_offset_1_when_today_is_at_0_and_yesterday_is_at_1(self):
+        from datetime import date
+        frame = _FakeDateListFrame({"0": "11/13/2026", "1": "11/12/2026"})
+        offset, detected_date = await determine_start_offset(
+            frame, "div.RowColumn-barContainer", date(2026, 11, 12)
+        )
+        self.assertEqual(offset, 1)
+        self.assertEqual(detected_date, date(2026, 11, 12))
+
+    async def test_fallback_to_1_when_row_0_is_missing(self):
+        from datetime import date
+        frame = _FakeDateListFrame({"1": "11/12/2026"})
+        offset, detected_date = await determine_start_offset(
+            frame, "div.RowColumn-barContainer", date(2026, 11, 12)
+        )
+        self.assertEqual(offset, 1)
+        self.assertEqual(detected_date, date(2026, 11, 12))
 
 
 if __name__ == "__main__":
