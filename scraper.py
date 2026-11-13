@@ -94,16 +94,47 @@ async def select_report_date(
     row_date: Optional[date] = None
 
     if target is None:
-        row_item = await list_frame.query_selector(f"{listbox_base}:has(div[data-n='1'])")
-        if row_item is None:
-            raise RuntimeError("Second date row (data-n=1) not found in Date selection list.")
         expected = (datetime.now() - timedelta(days=1)).date()
-        row_date = _parse_row_date(await row_item.inner_text())
-        if row_date is None:
-            print(f"Warning: could not read the date of the second row. Assuming {expected}.")
-            row_date = expected
-        elif row_date != expected:
-            print(f"Warning: second row is {row_date}, not yesterday ({expected}). Using {row_date}.")
+        # Dynamically check whether data-n=0 is yesterday (when today's data has not synced yet)
+        item_0 = await list_frame.query_selector(f"{listbox_base}:has(div[data-n='0'])")
+        date_0 = _parse_row_date(await item_0.inner_text()) if item_0 else None
+
+        item_1 = await list_frame.query_selector(f"{listbox_base}:has(div[data-n='1'])")
+        date_1 = _parse_row_date(await item_1.inner_text()) if item_1 else None
+
+        if date_0 == expected:
+            print(
+                f"Date list starts with yesterday ({date_0}) at data-n=0 "
+                f"(today's data not yet in SKIDATA). Using data-n=0."
+            )
+            row_item = item_0
+            row_date = date_0
+        elif date_1 == expected:
+            print(
+                f"Date list starts with today ({date_0}) at data-n=0. "
+                f"Yesterday ({date_1}) is at data-n=1. Using data-n=1."
+            )
+            row_item = item_1
+            row_date = date_1
+        elif date_0 is not None and date_0 <= expected:
+            print(
+                f"Date at data-n=0 is {date_0} (<= expected yesterday {expected}). "
+                f"Using data-n=0 as latest available day."
+            )
+            row_item = item_0
+            row_date = date_0
+        elif item_1 is not None:
+            print(
+                f"Notice: data-n=0 is {date_0}, data-n=1 is {date_1} "
+                f"(expected yesterday {expected}). Using data-n=1."
+            )
+            row_item = item_1
+            row_date = date_1 or expected
+        elif item_0 is not None:
+            row_item = item_0
+            row_date = date_0 or expected
+        else:
+            raise RuntimeError("No date rows (data-n=0 or 1) found in Date selection list.")
     else:
         seen: set = set()
         for _ in range(40):
