@@ -14,6 +14,7 @@ import sys
 from dotenv import load_dotenv
 
 from scraper import login_and_open_portal
+from validator import validate_exports
 from Transformer import run as transform_exports
 from To_Sharepoint import main as upload_to_sharepoint
 from odoo_export import main as export_for_odoo
@@ -27,6 +28,17 @@ def main():
     print("Step 1/4: Scraping SKIDATA reports...")
     print("=" * 60)
     asyncio.run(login_and_open_portal())
+
+    skip_validation = os.getenv("SKIP_VALIDATION", "false").lower() in ("true", "1", "yes")
+    if not skip_validation:
+        print("\n" + "=" * 60)
+        print("Step 1.5/4: Validating downloaded exports...")
+        print("=" * 60)
+        validate_exports(exports_dir="exports", strict=True)
+    else:
+        print("\n" + "=" * 60)
+        print("Step 1.5/4: Skipped export validation (SKIP_VALIDATION=true)...")
+        print("=" * 60)
 
     print("\n" + "=" * 60)
     print("Step 2/4: Transforming and cleaning exports...")

@@ -2,7 +2,7 @@ import glob
 import asyncio
 import os
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -68,6 +68,19 @@ async def find_frame_with_selector(
     return None
 
 
+AST_TIMEZONE = timezone(timedelta(hours=3))
+
+
+def get_ast_now() -> datetime:
+    """Return current datetime in Saudi Arabia Standard Time (AST = UTC+3)."""
+    return datetime.now(AST_TIMEZONE)
+
+
+def get_expected_yesterday() -> date:
+    """Return yesterday's calendar date in Saudi Arabia Standard Time (AST)."""
+    return (get_ast_now() - timedelta(days=1)).date()
+
+
 def parse_target_date() -> Optional[date]:
     """TARGET_DATE=YYYY-MM-DD selects a specific report day. Empty means yesterday or rolling window."""
     raw = os.getenv("TARGET_DATE", "").strip()
@@ -75,13 +88,13 @@ def parse_target_date() -> Optional[date]:
 
 
 def parse_days_count() -> int:
-    """DAYS_COUNT specifies how many rolling past days to fetch (default: 5)."""
-    raw = os.getenv("DAYS_COUNT", "5").strip()
+    """DAYS_COUNT specifies how many rolling past days to fetch (default: 15)."""
+    raw = os.getenv("DAYS_COUNT", "15").strip()
     try:
         val = int(raw)
         return max(1, val)
     except ValueError:
-        return 5
+        return 15
 
 
 def _parse_row_date(text: str) -> Optional[date]:
@@ -396,7 +409,7 @@ async def resolve_target_start_offset(
     If exact yesterday is not in SKIDATA, safely selects the latest date <= yesterday.
     Returns (item, offset_n, selected_date).
     """
-    yesterday = expected_yesterday or (datetime.now() - timedelta(days=1)).date()
+    yesterday = expected_yesterday or get_expected_yesterday()
     wanted_date = target_date or yesterday
 
     # 1. Quick check visible items without scrolling
@@ -452,7 +465,7 @@ async def select_report_date(
     Otherwise: selects a rolling window of DAYS_COUNT starting from yesterday (or latest <= yesterday).
     """
     target = parse_target_date()
-    expected_yesterday = (datetime.now() - timedelta(days=1)).date()
+    expected_yesterday = get_expected_yesterday()
 
     if target is not None:
         # Single specific target date mode
@@ -829,7 +842,7 @@ async def run_parking_transactions_flow(
 
     target_date = parse_target_date()
     days_count = parse_days_count() if target_date is None else 1
-    yesterday = (datetime.now() - timedelta(days=1)).date()
+    yesterday = get_expected_yesterday()
     date_prefix = (target_date or yesterday).strftime("%d-%b-%y")
     target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}.xlsx")
     os.makedirs(download_dir, exist_ok=True)

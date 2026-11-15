@@ -21,9 +21,9 @@ on:
         required: false
         default: ""
       days_count:
-        description: "Daily Script: Number of rolling past days to fetch (default: 5)"
+        description: "Daily Script: Number of rolling past days to fetch (default: 15)"
         required: false
-        default: "5"
+        default: "15"
       target_date:
         description: "Daily Script: Specific single date (YYYY-MM-DD), leave empty for rolling days"
         required: false
@@ -65,7 +65,7 @@ jobs:
         env:
           HEADLESS: "true"
           TARGET_DATE: ${{ inputs.target_date }}
-          DAYS_COUNT: ${{ inputs.days_count || '5' }}
+          DAYS_COUNT: ${{ inputs.days_count || '15' }}
           TARGET_FOLDER_PATH: "Ski Data 5"
           TARGET_FOLDER_PATH_ODOO: "Ski Data 5"
           SKIP_ODOO_EXPORT: "true"
@@ -94,3 +94,14 @@ jobs:
             echo "=========================================================="
             python main.py
           fi
+
+      - name: Archive exports and pipeline artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: skidata-run-artifacts
+          path: |
+            exports/
+            Cleaned-Exports/
+            Odoo-Exports/
+          retention-days: 7
