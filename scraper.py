@@ -175,6 +175,62 @@ async def _clear_qlik_selections(page: Page) -> None:
             pass
 
 
+async def _trigger_export_and_download(
+    page: Page,
+    dest_path: str,
+    timeout_s: float = 300.0,
+) -> str:
+    """
+    Handles clicking modal Export (if shown), waiting for download link across page and all frames,
+    triggering download, saving to dest_path, and closing dialogs.
+    """
+    btn_res = await _wait_for_visible_element_across_all(
+        page, MODAL_EXPORT_BUTTON_SELECTORS, timeout_s=15.0, check_interval=0.4
+    )
+    if btn_res is not None:
+        btn, _ = btn_res
+        try:
+            await btn.scroll_into_view_if_needed()
+            await btn.click(force=True)
+            print("Clicked modal Export button.")
+        except Exception:
+            pass
+    else:
+        try:
+            await page.keyboard.press("Enter")
+        except Exception:
+            pass
+
+    print("Waiting for export link to appear...")
+    link_res = await _wait_for_visible_element_across_all(
+        page, DOWNLOAD_LINK_SELECTORS, timeout_s=timeout_s, check_interval=1.0
+    )
+    if link_res is None:
+        raise RuntimeError("Export link did not appear in any frame.")
+
+    download_link, _ = link_res
+    print("Export link found, starting download...")
+    os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
+
+    async with page.expect_download(timeout=180_000) as download_info:
+        await download_link.click(force=True)
+    download = await download_info.value
+
+    base, ext = os.path.splitext(dest_path)
+    if not ext:
+        sugg_ext = os.path.splitext(download.suggested_filename)[1] or ".xlsx"
+        dest_path = f"{base}{sugg_ext}"
+
+    if os.path.exists(dest_path):
+        os.remove(dest_path)
+    await download.save_as(dest_path)
+    print(f"Download completed and saved to: {dest_path} ({os.path.getsize(dest_path):,} bytes)")
+
+    await _close_any_dialog(page)
+    await asyncio.sleep(0.5)
+    return dest_path
+
+
 async def _collect_visible_offsets(list_frame: Frame, listbox_base: str) -> tuple[list, list[str]]:
     """Return rendered listbox items and their data-n/text tokens for progress detection."""
     items = await list_frame.query_selector_all(listbox_base)
@@ -287,93 +343,123 @@ async def _find_listbox_item_by_offset(
     return None
 
 
-async def determine_start_offset(
-    list_frame: Frame, listbox_base: str, expected_yesterday: date
-) -> tuple[int, Optional[date]]:
+async def find_date_item_by_date(
+    list_frame: Frame,
+    listbox_base: str,
+    target_date: date,
+    max_scrolls: int = 40,
+    page: Optional[Page] = None,
+) -> tuple[Optional[any], Optional[int], Optional[date]]:
     """
-    Determine whether to start at data-n=0 or data-n=1:
-    - If data-n=0 is yesterday (meaning today's partial data has not synced to SKIDATA yet), start at data-n=0.
-    - If data-n=0 is today (or newer than yesterday), start at data-n=1 (which is yesterday).
-    - If date parsing fails or data-n=0 is missing, fallback to 1.
-    Returns (start_offset, detected_reference_date).
+    Search listbox for target_date by inspecting row date text.
+    Scrolls virtualized list if needed.
+    Returns (row_item, offset_n, parsed_date).
     """
-    item_0 = await list_frame.query_selector(f"{listbox_base}:has(div[data-n='0'])")
-    if item_0 is None:
-        return 1, expected_yesterday
+    prev_sig = None
+    stagnant = 0
 
-    date_0 = _parse_row_date(await item_0.inner_text())
-    if date_0 == expected_yesterday:
-        print(
-            f"Date list starts with yesterday ({date_0}) at data-n=0 "
-            f"(today's data not yet in SKIDATA). Starting at offset 0."
-        )
-        return 0, date_0
+    for scroll_idx in range(max_scrolls):
+        items, tokens = await _collect_visible_offsets(list_frame, listbox_base)
+        for item in items:
+            txt = (await item.inner_text()).strip()
+            d = _parse_row_date(txt)
+            if d == target_date:
+                n_el = await item.query_selector("div[data-n]")
+                n_val = int(await n_el.get_attribute("data-n")) if n_el else None
+                return item, n_val, d
 
-    item_1 = await list_frame.query_selector(f"{listbox_base}:has(div[data-n='1'])")
-    date_1 = _parse_row_date(await item_1.inner_text()) if item_1 else None
+        sig = tuple(tokens)
+        if sig and sig == prev_sig:
+            stagnant += 1
+            if stagnant >= 6:
+                break
+        else:
+            stagnant = 0
+            prev_sig = sig
 
-    if date_1 == expected_yesterday:
-        print(
-            f"Date list starts with today ({date_0}) at data-n=0. "
-            f"Yesterday ({date_1}) is at data-n=1. Starting at offset 1."
-        )
-        return 1, date_1
+        await _scroll_listbox_down(list_frame, items, page=page)
+        await asyncio.sleep(0.3)
 
-    if date_0 is not None and date_0 <= expected_yesterday:
-        print(
-            f"Date at data-n=0 is {date_0} (<= expected yesterday {expected_yesterday}). "
-            f"Using offset 0 as latest available day."
-        )
-        return 0, date_0
+    return None, None, None
 
-    print(
-        f"Notice: data-n=0 is {date_0}, data-n=1 is {date_1} (expected yesterday {expected_yesterday}). "
-        f"Defaulting to offset 1."
+
+async def resolve_target_start_offset(
+    list_frame: Frame,
+    listbox_base: str,
+    target_date: Optional[date] = None,
+    expected_yesterday: Optional[date] = None,
+    page: Optional[Page] = None,
+) -> tuple[any, int, date]:
+    """
+    Find the item, offset_n, and date for target_date (or yesterday by default).
+    Strictly ignores any future dates (> expected_yesterday) and today.
+    If exact yesterday is not in SKIDATA, safely selects the latest date <= yesterday.
+    Returns (item, offset_n, selected_date).
+    """
+    yesterday = expected_yesterday or (datetime.now() - timedelta(days=1)).date()
+    wanted_date = target_date or yesterday
+
+    # 1. Quick check visible items without scrolling
+    items = await list_frame.query_selector_all(listbox_base)
+    seen: dict[date, tuple[any, int]] = {}
+    for item in items:
+        txt = (await item.inner_text()).strip()
+        d = _parse_row_date(txt)
+        if d is not None:
+            n_el = await item.query_selector("div[data-n]")
+            n_val = int(await n_el.get_attribute("data-n")) if n_el else 0
+            seen[d] = (item, n_val)
+            if d == wanted_date:
+                print(f"Target date {d} matched at data-n={n_val}.")
+                return item, n_val, d
+
+    # 2. If not found in first batch, scroll down to search
+    item, n_val, d = await find_date_item_by_date(
+        list_frame, listbox_base, wanted_date, max_scrolls=25, page=page
     )
-    return 1, (date_1 or date_0 or expected_yesterday)
+    if item is not None and n_val is not None and d is not None:
+        print(f"Target date {d} matched after scroll at data-n={n_val}.")
+        return item, n_val, d
+
+    # 3. If target_date was explicitly passed, it must match
+    if target_date is not None:
+        raise RuntimeError(f"Requested TARGET_DATE {target_date} not found in SKIDATA Date filter.")
+
+    # 4. Fallback for yesterday: find latest available completed date <= yesterday
+    # (Never pick future dates or today!)
+    past_dates = [dt for dt in seen.keys() if dt <= yesterday]
+    if past_dates:
+        latest = max(past_dates)
+        best_item, best_n = seen[latest]
+        print(
+            f"Notice: Expected yesterday ({yesterday}) not yet in SKIDATA. "
+            f"Using latest available date {latest} at data-n={best_n}."
+        )
+        return best_item, best_n, latest
+
+    raise RuntimeError(
+        f"No valid dates <= {yesterday} found in SKIDATA listbox. "
+        f"Seen dates: {list(seen.keys())}"
+    )
 
 
 async def select_report_date(
     list_frame: Frame, listbox_base: str, page: Page, confirm_required: bool
 ) -> date:
     """
-    Select date(s) in the open Date filter list and return the reference date (yesterday).
+    Select date(s) in the open Date filter list and return the reference date.
     If TARGET_DATE is set: selects that specific single date.
-    Otherwise: selects a rolling window of DAYS_COUNT (from offset determined by whether today exists).
+    Otherwise: selects a rolling window of DAYS_COUNT starting from yesterday (or latest <= yesterday).
     """
     target = parse_target_date()
     expected_yesterday = (datetime.now() - timedelta(days=1)).date()
-    row_date: Optional[date] = expected_yesterday
 
     if target is not None:
         # Single specific target date mode
-        row_item = None
-        seen: set = set()
-        for _ in range(40):
-            items = await list_frame.query_selector_all(listbox_base)
-            before = len(seen)
-            for item in items:
-                d = _parse_row_date(await item.inner_text())
-                if d is not None:
-                    seen.add(d)
-                if d == target:
-                    row_item, row_date = item, d
-                    break
-            if row_item is not None:
-                break
-            if not items or (len(seen) == before and seen):
-                break  # the list stopped growing
-            await items[-1].scroll_into_view_if_needed()
-            await asyncio.sleep(0.6)
-        if row_item is None:
-            if seen:
-                raise RuntimeError(
-                    f"Date {target} is not in the portal list (seen {min(seen)} to {max(seen)})."
-                )
-            raise RuntimeError(f"Date {target} is not in the portal list.")
-        print(f"Selecting {target} from the Date list.")
-
-        row_el = await row_item.query_selector('[role="row"]')
+        item, n_val, row_date = await resolve_target_start_offset(
+            list_frame, listbox_base, target_date=target, page=page
+        )
+        row_el = await item.query_selector('[role="row"]')
         already = row_el is not None and await row_el.get_attribute("aria-selected") == "true"
         if already:
             print(f"Date {row_date} is already selected. Closing filter without changes.")
@@ -381,30 +467,23 @@ async def select_report_date(
             await asyncio.sleep(0.5)
             return row_date
 
-        await row_item.click()
+        await item.scroll_into_view_if_needed()
+        await item.click()
 
     else:
         # Rolling multi-day window mode (default: past 5 or 15 days)
         days_count = parse_days_count()
-        start_offset, detected_date = await determine_start_offset(
-            list_frame, listbox_base, expected_yesterday
+        item, start_offset, row_date = await resolve_target_start_offset(
+            list_frame, listbox_base, expected_yesterday=expected_yesterday, page=page
         )
-        if detected_date is not None:
-            row_date = detected_date
         end_offset = start_offset + days_count - 1
-        print(f"Selecting {days_count} day(s) range (data-n={start_offset} to data-n={end_offset})...")
+        print(f"Selecting {days_count} day(s) range (data-n={start_offset} to data-n={end_offset}) ending at {row_date}...")
 
         selected_count = 0
         for n in range(start_offset, end_offset + 1):
             row_item = await _find_listbox_item_by_offset(list_frame, listbox_base, n, page=page)
 
             if row_item is not None:
-                # Capture the exact reference date for naming
-                if n == start_offset:
-                    parsed_d = _parse_row_date(await row_item.inner_text())
-                    if parsed_d is not None:
-                        row_date = parsed_d
-
                 row_el = await row_item.query_selector('[role="row"]')
                 already = row_el is not None and await row_el.get_attribute("aria-selected") == "true"
                 if not already:
@@ -572,27 +651,9 @@ async def run_in_depth_flow(
     await export_item.click()
 
     # 6) Wait for export to generate, then find and click the download link
-    print("Waiting for export to complete and download link to appear...")
-    await asyncio.sleep(15)
-
-    export_link_selector = "a.export-url"
-    export_frame = await find_frame_with_selector(page, export_link_selector, total_timeout_ms=600_000, per_frame_timeout_ms=2_000)
-    if export_frame is None:
-        raise RuntimeError("Export link did not appear in any frame.")
-
-    await export_frame.wait_for_selector(export_link_selector, timeout=300_000)
-
-    print("Export link found, starting download...")
-    os.makedirs(download_dir, exist_ok=True)
-
-    async with page.expect_download() as download_info:
-        await export_frame.click(export_link_selector)
-    download = await download_info.value
-    ext = os.path.splitext(download.suggested_filename)[1] or ".xlsx"
     date_prefix = selected_date.strftime("%d-%b-%y")  # e.g. 15-Feb-26
-    target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}{ext}")
-    await download.save_as(target_path)
-    print(f"Download completed and saved to: {target_path}")
+    target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}.xlsx")
+    await _trigger_export_and_download(page, target_path, timeout_s=300.0)
     print(f"Exports folder (for upload): {os.path.abspath(download_dir)}")
 
 
@@ -692,35 +753,9 @@ async def _export_parking_single_day(
     await export_item.click()
     await asyncio.sleep(1)
 
-    # Click modal Export button (visible element across page + all frames)
-    btn_res = await _wait_for_visible_element_across_all(
-        page, MODAL_EXPORT_BUTTON_SELECTORS, timeout_s=15.0, check_interval=0.4
-    )
-    if btn_res is not None:
-        btn, _ = btn_res
-        await btn.scroll_into_view_if_needed()
-        await btn.click(force=True)
-    else:
-        await page.keyboard.press("Enter")
-
-    # Wait for visible download link across page + all frames
-    link_res = await _wait_for_visible_element_across_all(
-        page, DOWNLOAD_LINK_SELECTORS, timeout_s=150.0, check_interval=0.8
-    )
-    if link_res is None:
-        raise RuntimeError(f"Export link not found for Parking Transactions offset {n}")
-    download_link, _ = link_res
-
-    async with page.expect_download(timeout=120_000) as download_info:
-        await download_link.click(force=True)
-    download = await download_info.value
-
     temp_path = os.path.join(download_dir, f"temp_parking_day_{n}.xlsx")
-    await download.save_as(temp_path)
+    await _trigger_export_and_download(page, temp_path, timeout_s=180.0)
     print(f"    Saved day offset {n}: {os.path.getsize(temp_path):,} bytes")
-
-    await _close_any_dialog(page)
-    await asyncio.sleep(0.8)
     return temp_path
 
 
@@ -804,14 +839,17 @@ async def run_parking_transactions_flow(
     if days_count == 1:
         # Standard single day extraction
         list_frame = await _open_date_listbox(page, listbox_base, total_timeout_ms=60_000)
-        start_offset = 1
-        if target_date is None:
-            start_offset, detected_date = await determine_start_offset(
-                list_frame, listbox_base, yesterday
+        if target_date is not None:
+            _, start_offset, detected_date = await resolve_target_start_offset(
+                list_frame, listbox_base, target_date=target_date, page=page
             )
-            if detected_date is not None:
-                date_prefix = detected_date.strftime("%d-%b-%y")
-                target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}.xlsx")
+        else:
+            _, start_offset, detected_date = await resolve_target_start_offset(
+                list_frame, listbox_base, expected_yesterday=yesterday, page=page
+            )
+        if detected_date is not None:
+            date_prefix = detected_date.strftime("%d-%b-%y")
+            target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}.xlsx")
         single_temp = await _export_parking_single_day(
             page, list_frame, listbox_base, n=start_offset, prev_n=None, download_dir=download_dir, header_selector=header_selector
         )
@@ -826,10 +864,10 @@ async def run_parking_transactions_flow(
         day_files = []
         prev_n = None
 
-        # Determine start_offset dynamically based on whether SKIDATA has synced today
+        # Determine start_offset dynamically based on resolved target date (bypassing any future dates)
         list_frame = await _open_date_listbox(page, listbox_base, total_timeout_ms=60_000)
-        start_offset, detected_date = await determine_start_offset(
-            list_frame, listbox_base, yesterday
+        _, start_offset, detected_date = await resolve_target_start_offset(
+            list_frame, listbox_base, expected_yesterday=yesterday, page=page
         )
         if detected_date is not None:
             date_prefix = detected_date.strftime("%d-%b-%y")
@@ -865,6 +903,51 @@ async def run_parking_transactions_flow(
         for f in day_files:
             if os.path.exists(f):
                 os.remove(f)
+
+
+async def run_report_with_retries(
+    report_name: str,
+    open_tab_fn,
+    flow_coro_fn,
+    max_retries: int = 2,
+    cleanup_tab_fn=None,
+    retry_delay_s: float = 3.0,
+) -> None:
+    """
+    Executes a report flow with up to max_retries retry attempts (max_retries + 1 total).
+    Opens a clean reports tab per attempt and cleans up afterwards.
+    """
+    total_attempts = max_retries + 1
+    last_err = None
+    for attempt in range(1, total_attempts + 1):
+        rep_page = None
+        try:
+            print(f"[{report_name}] Starting execution (attempt {attempt}/{total_attempts})...")
+            rep_page = await open_tab_fn()
+            await flow_coro_fn(rep_page)
+            print(f"[{report_name}] Successfully completed on attempt {attempt}.")
+            return
+        except Exception as exc:
+            last_err = exc
+            print(f"[{report_name}] Attempt {attempt}/{total_attempts} failed: {exc!r}")
+            if attempt < total_attempts:
+                print(f"[{report_name}] Retrying after cleanup...")
+                await asyncio.sleep(retry_delay_s)
+        finally:
+            if rep_page is not None:
+                if cleanup_tab_fn is not None:
+                    try:
+                        await cleanup_tab_fn(rep_page)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        if hasattr(rep_page, "is_closed") and not rep_page.is_closed():
+                            await rep_page.close()
+                    except Exception:
+                        pass
+
+    raise RuntimeError(f"[{report_name}] Failed after {total_attempts} attempts. Last error: {last_err}") from last_err
 
 
 async def login_and_open_portal() -> None:
@@ -977,144 +1060,106 @@ async def login_and_open_portal() -> None:
         # Scroll card into view just in case.
         await card_element.scroll_into_view_if_needed()
 
-        # Scroll into view and click anywhere in the card container to open the app.
-        await card_element.scroll_into_view_if_needed()
-        await card_element.click()
+        # Helper to open a fresh reports tab from the hub card
+        async def _open_fresh_reports_tab() -> Page:
+            print("Opening new reports tab from portal card...")
+            await page.bring_to_front()
+            await _close_any_dialog(page)
+            await card_element.scroll_into_view_if_needed()
+            await card_element.click()
+            new_page_promise = context.wait_for_event("page", timeout=60_000)
+            try:
+                rep_page = await new_page_promise
+            except Exception as exc:
+                raise RuntimeError("No new tab opened after clicking portal card.") from exc
 
-        print("Clicked portal card, waiting for new tab with reports...")
+            await rep_page.wait_for_load_state("domcontentloaded")
+            print("New reports tab detected. URL:", rep_page.url)
+            try:
+                await rep_page.wait_for_load_state("networkidle", timeout=60_000)
+            except PlaywrightTimeoutError:
+                await rep_page.wait_for_load_state("load")
+            await asyncio.sleep(4)
+            return rep_page
 
-        # Wait for a new page (tab) to open.
-        new_page_promise = context.wait_for_event("page", timeout=60_000)
-        try:
-            new_page = await new_page_promise
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("No new tab opened after clicking portal card.") from exc
+        async def _cleanup_reports_tab(rep_page: Page) -> None:
+            if rep_page is not None and not rep_page.is_closed():
+                try:
+                    await rep_page.close()
+                except Exception:
+                    pass
+            await page.bring_to_front()
+            await asyncio.sleep(1)
 
-        await new_page.wait_for_load_state("domcontentloaded")
-        print("New reports tab detected. URL:", new_page.url)
-        # Wait for reports page to fully load before interacting.
-        try:
-            await new_page.wait_for_load_state("networkidle", timeout=60_000)
-        except PlaywrightTimeoutError:
-            await new_page.wait_for_load_state("load")
-        await asyncio.sleep(5)
-
-        # Run Revenue in Depth Analysis (skip if already exported).
         import glob
+
+        # 1) Revenue in Depth Analysis
         if not glob.glob(os.path.join(download_dir, "*Revenue-In-Depth.xlsx")):
-            await run_in_depth_flow(
-                new_page, download_dir,
+            await run_report_with_retries(
                 "Revenue in Depth Analysis",
-                "Revenue-In-Depth",
-                "header#CwPV_title",
+                _open_fresh_reports_tab,
+                lambda p: run_in_depth_flow(
+                    p,
+                    download_dir,
+                    "Revenue in Depth Analysis",
+                    "Revenue-In-Depth",
+                    "header#CwPV_title",
+                ),
+                max_retries=2,
+                cleanup_tab_fn=_cleanup_reports_tab,
             )
         else:
             print("Revenue-In-Depth already exported. Skipping.")
 
-        # Close the reports tab and return to portal tab.
-        print("Closing reports tab and returning to portal...")
-        await new_page.close()
-        await page.bring_to_front()
-        await asyncio.sleep(2)
-
-        # Click portal card again to open a new reports tab for Access In Depth.
-        print("Clicking portal card again for Access In Depth...")
-        await card_element.scroll_into_view_if_needed()
-        await card_element.click()
-
-        # Wait for new reports tab.
-        new_page_promise = context.wait_for_event("page", timeout=60_000)
-        try:
-            new_page = await new_page_promise
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("No new tab opened after clicking portal card (second time).") from exc
-
-        await new_page.wait_for_load_state("domcontentloaded")
-        print("New reports tab detected for Access In Depth. URL:", new_page.url)
-        try:
-            await new_page.wait_for_load_state("networkidle", timeout=60_000)
-        except PlaywrightTimeoutError:
-            await new_page.wait_for_load_state("load")
-        await asyncio.sleep(5)
-
-        # Run Access In Depth Analysis (skip if already exported).
+        # 2) Access in Depth Analysis
         if not glob.glob(os.path.join(download_dir, "*Access-In-Depth.xlsx")):
-            await run_in_depth_flow(
-                new_page, download_dir,
+            await run_report_with_retries(
                 "Access in Depth Analysis",
-                "Access-In-Depth",
-                "header#b8cfe7c0-f39f-45ce-8529-5edd3499c57b_title",
+                _open_fresh_reports_tab,
+                lambda p: run_in_depth_flow(
+                    p,
+                    download_dir,
+                    "Access in Depth Analysis",
+                    "Access-In-Depth",
+                    "header#b8cfe7c0-f39f-45ce-8529-5edd3499c57b_title",
+                ),
+                max_retries=2,
+                cleanup_tab_fn=_cleanup_reports_tab,
             )
         else:
             print("Access-In-Depth already exported. Skipping.")
 
-        # Close reports tab and return to portal for System Event In Depth.
-        print("Closing reports tab and returning to portal...")
-        await new_page.close()
-        await page.bring_to_front()
-        await asyncio.sleep(2)
-
-        # Click portal card again for System Event In Depth.
-        print("Clicking portal card again for System Event In Depth...")
-        await card_element.scroll_into_view_if_needed()
-        await card_element.click()
-
-        new_page_promise = context.wait_for_event("page", timeout=60_000)
-        try:
-            new_page = await new_page_promise
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("No new tab opened after clicking portal card (third time).") from exc
-
-        await new_page.wait_for_load_state("domcontentloaded")
-        print("New reports tab detected for System Event In Depth. URL:", new_page.url)
-        try:
-            await new_page.wait_for_load_state("networkidle", timeout=60_000)
-        except PlaywrightTimeoutError:
-            await new_page.wait_for_load_state("load")
-        await asyncio.sleep(5)
-
-        # Run System Event In Depth Analysis (skip if already exported).
+        # 3) System Event in Depth Analysis
         if not glob.glob(os.path.join(download_dir, "*System-Event-In-Depth.xlsx")):
-            await run_in_depth_flow(
-                new_page, download_dir,
+            await run_report_with_retries(
                 "System Event in Depth Analysis",
-                "System-Event-In-Depth",
-                "header#jKmZn_title",
+                _open_fresh_reports_tab,
+                lambda p: run_in_depth_flow(
+                    p,
+                    download_dir,
+                    "System Event in Depth Analysis",
+                    "System-Event-In-Depth",
+                    "header#jKmZn_title",
+                ),
+                max_retries=2,
+                cleanup_tab_fn=_cleanup_reports_tab,
             )
         else:
             print("System-Event-In-Depth already exported. Skipping.")
 
-        # Close reports tab and return to portal for Parking Transactions.
-        print("Closing reports tab and returning to portal...")
-        await new_page.close()
-        await page.bring_to_front()
+        # 4) Parking Transactions
+        if not glob.glob(os.path.join(download_dir, "*Parking-Transactions.xlsx")):
+            await run_report_with_retries(
+                "Parking Transactions",
+                _open_fresh_reports_tab,
+                lambda p: run_parking_transactions_flow(p, download_dir),
+                max_retries=2,
+                cleanup_tab_fn=_cleanup_reports_tab,
+            )
+        else:
+            print("Parking-Transactions already exported. Skipping.")
+
         await asyncio.sleep(2)
-
-        # Click portal card again for Parking Transactions.
-        print("Clicking portal card again for Parking Transactions...")
-        await card_element.scroll_into_view_if_needed()
-        await card_element.click()
-
-        new_page_promise = context.wait_for_event("page", timeout=60_000)
-        try:
-            new_page = await new_page_promise
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(
-                "No new tab opened after clicking portal card (fourth time)."
-            ) from exc
-
-        await new_page.wait_for_load_state("domcontentloaded")
-        print("New reports tab detected for Parking Transactions. URL:", new_page.url)
-        try:
-            await new_page.wait_for_load_state("networkidle", timeout=60_000)
-        except PlaywrightTimeoutError:
-            await new_page.wait_for_load_state("load")
-        await asyncio.sleep(5)
-
-        # Run Parking Transactions.
-        await run_parking_transactions_flow(new_page, download_dir)
-
-        await asyncio.sleep(3)
         await browser.close()
 
 

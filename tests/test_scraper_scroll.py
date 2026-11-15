@@ -11,7 +11,9 @@ if BASE_DIR not in sys.path:
 from scraper import (
     _find_listbox_item_by_offset,
     _wait_for_visible_element_across_all,
-    determine_start_offset,
+    find_date_item_by_date,
+    resolve_target_start_offset,
+    run_report_with_retries,
 )
 
 
@@ -183,51 +185,203 @@ class TestVirtualListboxScroll(unittest.IsolatedAsyncioTestCase):
 
 
 class _FakeDateItem:
-    def __init__(self, text: str):
+    def __init__(self, n: int, text: str):
+        self.n = n
         self._text = text
 
     async def inner_text(self) -> str:
         return self._text
 
+    async def query_selector(self, selector: str):
+        if selector == "div[data-n]":
+            return _FakeDataN(self.n)
+        return None
+
+    async def scroll_into_view_if_needed(self):
+        pass
+
+    async def click(self):
+        pass
+
 
 class _FakeDateListFrame:
     def __init__(self, mapping: dict[str, str]):
-        self._mapping = mapping
+        self._items = [_FakeDateItem(int(n), txt) for n, txt in mapping.items()]
 
     async def query_selector(self, selector: str):
-        for n_str, date_text in self._mapping.items():
-            if f"data-n='{n_str}'" in selector:
-                return _FakeDateItem(date_text)
+        for item in self._items:
+            if f"data-n='{item.n}'" in selector:
+                return item
         return None
 
+    async def query_selector_all(self, _selector: str):
+        return list(self._items)
 
-class TestDetermineStartOffset(unittest.IsolatedAsyncioTestCase):
+
+class TestResolveTargetStartOffset(unittest.IsolatedAsyncioTestCase):
+    async def test_skips_future_dates_and_selects_exact_yesterday(self):
+        from datetime import date
+        # Future reservation dates present in SKIDATA (11/17, 11/16, 11/15)
+        # Yesterday is 11/14 at data-n=3
+        frame = _FakeDateListFrame({
+            "0": "11/17/2026",
+            "1": "11/16/2026",
+            "2": "11/15/2026",
+            "3": "11/14/2026",
+            "4": "11/13/2026",
+        })
+        item, offset, selected_date = await resolve_target_start_offset(
+            frame, "div.RowColumn-barContainer", expected_yesterday=date(2026, 11, 14)
+        )
+        self.assertEqual(offset, 3)
+        self.assertEqual(selected_date, date(2026, 11, 14))
+        self.assertIsNotNone(item)
+
     async def test_uses_offset_0_when_today_is_missing_and_0_is_yesterday(self):
         from datetime import date
         frame = _FakeDateListFrame({"0": "11/12/2026", "1": "11/11/2026"})
-        offset, detected_date = await determine_start_offset(
-            frame, "div.RowColumn-barContainer", date(2026, 11, 12)
+        item, offset, selected_date = await resolve_target_start_offset(
+            frame, "div.RowColumn-barContainer", expected_yesterday=date(2026, 11, 12)
         )
         self.assertEqual(offset, 0)
-        self.assertEqual(detected_date, date(2026, 11, 12))
+        self.assertEqual(selected_date, date(2026, 11, 12))
 
     async def test_uses_offset_1_when_today_is_at_0_and_yesterday_is_at_1(self):
         from datetime import date
         frame = _FakeDateListFrame({"0": "11/13/2026", "1": "11/12/2026"})
-        offset, detected_date = await determine_start_offset(
-            frame, "div.RowColumn-barContainer", date(2026, 11, 12)
+        item, offset, selected_date = await resolve_target_start_offset(
+            frame, "div.RowColumn-barContainer", expected_yesterday=date(2026, 11, 12)
         )
         self.assertEqual(offset, 1)
-        self.assertEqual(detected_date, date(2026, 11, 12))
+        self.assertEqual(selected_date, date(2026, 11, 12))
 
-    async def test_fallback_to_1_when_row_0_is_missing(self):
+    async def test_fallback_to_latest_past_date_when_yesterday_missing(self):
         from datetime import date
-        frame = _FakeDateListFrame({"1": "11/12/2026"})
-        offset, detected_date = await determine_start_offset(
-            frame, "div.RowColumn-barContainer", date(2026, 11, 12)
+        # Expected yesterday 11/14 is missing due to delayed sync, latest is 11/13
+        frame = _FakeDateListFrame({"0": "11/13/2026", "1": "11/12/2026"})
+        item, offset, selected_date = await resolve_target_start_offset(
+            frame, "div.RowColumn-barContainer", expected_yesterday=date(2026, 11, 14)
         )
-        self.assertEqual(offset, 1)
-        self.assertEqual(detected_date, date(2026, 11, 12))
+        self.assertEqual(offset, 0)
+        self.assertEqual(selected_date, date(2026, 11, 13))
+
+    async def test_matches_explicit_target_date(self):
+        from datetime import date
+        frame = _FakeDateListFrame({
+            "0": "11/17/2026",
+            "1": "11/16/2026",
+            "2": "11/10/2026",
+        })
+        item, offset, selected_date = await resolve_target_start_offset(
+            frame, "div.RowColumn-barContainer", target_date=date(2026, 11, 10)
+        )
+        self.assertEqual(offset, 2)
+        self.assertEqual(selected_date, date(2026, 11, 10))
+
+    async def test_raises_if_explicit_target_date_not_found(self):
+        from datetime import date
+        frame = _FakeDateListFrame({"0": "11/17/2026", "1": "11/16/2026"})
+        with self.assertRaises(RuntimeError):
+            await resolve_target_start_offset(
+                frame, "div.RowColumn-barContainer", target_date=date(2026, 11, 1)
+            )
+
+
+class TestRunReportWithRetries(unittest.IsolatedAsyncioTestCase):
+    async def test_succeeds_on_first_try(self):
+        opened_tabs = []
+        closed_tabs = []
+        flow_calls = []
+
+        async def fake_open():
+            tab_id = f"tab_{len(opened_tabs)+1}"
+            opened_tabs.append(tab_id)
+            return tab_id
+
+        async def fake_flow(tab):
+            flow_calls.append(tab)
+
+        async def fake_cleanup(tab):
+            closed_tabs.append(tab)
+
+        await run_report_with_retries(
+            "Test Report",
+            fake_open,
+            fake_flow,
+            max_retries=2,
+            cleanup_tab_fn=fake_cleanup,
+            retry_delay_s=0.01,
+        )
+
+        self.assertEqual(opened_tabs, ["tab_1"])
+        self.assertEqual(flow_calls, ["tab_1"])
+        self.assertEqual(closed_tabs, ["tab_1"])
+
+    async def test_succeeds_on_retry_after_transient_failure(self):
+        opened_tabs = []
+        closed_tabs = []
+        attempts = 0
+
+        async def fake_open():
+            tab_id = f"tab_{len(opened_tabs)+1}"
+            opened_tabs.append(tab_id)
+            return tab_id
+
+        async def fake_flow(tab):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise RuntimeError(f"Transient Qlik lag on attempt {attempts}")
+
+        async def fake_cleanup(tab):
+            closed_tabs.append(tab)
+
+        await run_report_with_retries(
+            "Test Report",
+            fake_open,
+            fake_flow,
+            max_retries=2,
+            cleanup_tab_fn=fake_cleanup,
+            retry_delay_s=0.01,
+        )
+
+        # 3 total attempts (attempt 1 fail, attempt 2 fail, attempt 3 succeed)
+        self.assertEqual(attempts, 3)
+        self.assertEqual(opened_tabs, ["tab_1", "tab_2", "tab_3"])
+        self.assertEqual(closed_tabs, ["tab_1", "tab_2", "tab_3"])
+
+    async def test_fails_and_raises_after_max_retries_exhausted(self):
+        opened_tabs = []
+        closed_tabs = []
+        attempts = 0
+
+        async def fake_open():
+            tab_id = f"tab_{len(opened_tabs)+1}"
+            opened_tabs.append(tab_id)
+            return tab_id
+
+        async def fake_flow(tab):
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("Permanent error")
+
+        async def fake_cleanup(tab):
+            closed_tabs.append(tab)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            await run_report_with_retries(
+                "Test Report",
+                fake_open,
+                fake_flow,
+                max_retries=2,
+                cleanup_tab_fn=fake_cleanup,
+                retry_delay_s=0.01,
+            )
+
+        self.assertIn("Failed after 3 attempts", str(ctx.exception))
+        self.assertEqual(attempts, 3)
+        self.assertEqual(opened_tabs, ["tab_1", "tab_2", "tab_3"])
+        self.assertEqual(closed_tabs, ["tab_1", "tab_2", "tab_3"])
 
 
 if __name__ == "__main__":
