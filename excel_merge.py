@@ -274,8 +274,13 @@ def merge_parking_xlsx(input_files: Iterable[str], output_path: str) -> int:
                         total_rows += 1
 
         wb_out.save(tmp_path)
+        wb_out.close()
         os.replace(tmp_path, output_path)
     finally:
+        try:
+            wb_out.close()
+        except Exception:
+            pass
         if os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
