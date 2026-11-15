@@ -32,10 +32,10 @@ on:
     # Allows external triggers (e.g. cron-job.org) via GitHub API
     types: [manual-trigger]
   schedule:
-    # Run 1: 05:50 UTC = 08:50 AM Saudi Time (AST) / 11:20 AM IST
-    - cron: "50 5 * * *"
-    # Run 2: 09:00 UTC = 12:00 PM (Noon) Saudi Time (AST) / 02:30 PM IST
-    - cron: "0 9 * * *"
+    # Run 1: 05:00 UTC = 08:00 AM Saudi Time (AST) / 10:30 AM IST (50m before daily scraper)
+    - cron: "0 5 * * *"
+    # Run 2: 09:45 UTC = 12:45 PM Saudi Time (AST) / 03:15 PM IST (45m after midday daily)
+    - cron: "45 9 * * *"
 
 concurrency:
   group: skidata-scraper
