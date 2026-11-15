@@ -1,6 +1,11 @@
 name: SKIDATA Scraper
 
 on:
+  schedule:
+    # Run 1: 05:50 UTC = 08:50 AM Saudi Time (AST) / 11:20 AM IST (Production Daily)
+    - cron: "50 5 * * *"
+    # Run 2: 09:00 UTC = 12:00 PM (Noon) Saudi Time (AST) / 02:30 PM IST (Midday Refresh)
+    - cron: "0 9 * * *"
   workflow_dispatch:
     # Allow manual trigger from GitHub Actions tab
     inputs:
@@ -8,9 +13,6 @@ on:
         description: "Day to export, YYYY-MM-DD. Leave empty for yesterday."
         required: false
         default: ""
-  repository_dispatch:
-    # Allows external triggers (e.g. cron-job.org) via GitHub API
-    types: [manual-trigger]
 
 concurrency:
   group: skidata-scraper
