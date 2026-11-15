@@ -2,7 +2,7 @@ import asyncio
 import glob
 import os
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -201,6 +201,19 @@ async def _trigger_export_and_download(
     return dest_path
 
 
+AST_TIMEZONE = timezone(timedelta(hours=3))
+
+
+def get_ast_now() -> datetime:
+    """Return current datetime in Saudi Arabia Standard Time (AST = UTC+3)."""
+    return datetime.now(AST_TIMEZONE)
+
+
+def get_expected_yesterday() -> date:
+    """Return yesterday's calendar date in Saudi Arabia Standard Time (AST)."""
+    return (get_ast_now() - timedelta(days=1)).date()
+
+
 def parse_target_date() -> Optional[date]:
     """TARGET_DATE=YYYY-MM-DD selects a specific report day. Empty means yesterday."""
     raw = os.getenv("TARGET_DATE", "").strip()
@@ -327,7 +340,7 @@ async def resolve_target_start_offset(
     If exact yesterday is not in SKIDATA, safely selects the latest date <= yesterday.
     Returns (item, offset_n, selected_date).
     """
-    yesterday = expected_yesterday or (datetime.now() - timedelta(days=1)).date()
+    yesterday = expected_yesterday or get_expected_yesterday()
     wanted_date = target_date or yesterday
 
     # 1. Quick check visible items without scrolling
@@ -382,7 +395,7 @@ async def select_report_date(
     Strictly ignores future dates and safely selects yesterday (or latest <= yesterday).
     """
     target = parse_target_date()
-    expected_yesterday = (datetime.now() - timedelta(days=1)).date()
+    expected_yesterday = get_expected_yesterday()
 
     if target is not None:
         item, _, row_date = await resolve_target_start_offset(

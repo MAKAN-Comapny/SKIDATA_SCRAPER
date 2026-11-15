@@ -51,3 +51,14 @@ jobs:
           SHAREPOINT_SITE_NAME: ${{ secrets.SHAREPOINT_SITE_NAME }}
           TARGET_FOLDER_PATH: ${{ secrets.TARGET_FOLDER_PATH }}
         run: python main.py
+
+      - name: Archive exports and pipeline artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: skidata-run-artifacts
+          path: |
+            exports/
+            Cleaned-Exports/
+            Odoo-Exports/
+          retention-days: 7
