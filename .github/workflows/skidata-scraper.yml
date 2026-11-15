@@ -67,8 +67,6 @@ jobs:
           TARGET_DATE: ${{ inputs.target_date }}
           DAYS_COUNT: ${{ inputs.days_count || '15' }}
           TARGET_FOLDER_PATH: "Ski Data 5"
-          TARGET_FOLDER_PATH_ODOO: "Ski Data 5"
-          SKIP_ODOO_EXPORT: "true"
           SKIDATA_URL: ${{ secrets.SKIDATA_URL }}
           SKIDATA_TENANT: ${{ secrets.SKIDATA_TENANT }}
           SKIDATA_LOGIN: ${{ secrets.SKIDATA_LOGIN }}
@@ -103,5 +101,4 @@ jobs:
           path: |
             exports/
             Cleaned-Exports/
-            Odoo-Exports/
           retention-days: 7

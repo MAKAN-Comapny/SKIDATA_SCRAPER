@@ -2,9 +2,9 @@
 SKIDATA Scraper Pipeline
 
 Orchestrates the full workflow:
-  1. Scraper  - Login to SKIDATA portal, download reports to exports/
-  2. Transformer - Clean Excel files, move to Cleaned-Exports/
-  3. odoo_export   - Build the Odoo import file and upload it to "SKIDATA - Odoo"
+  1. Scraper       - Login to SKIDATA portal, download reports to exports/
+  2. Validator     - Ensure data integrity, correct dates, and uncorrupted containers
+  3. Transformer   - Clean Excel files, move to Cleaned-Exports/
   4. To_Sharepoint - Upload cleaned files to Microsoft SharePoint
 """
 import asyncio
@@ -17,11 +17,10 @@ from scraper import login_and_open_portal
 from validator import validate_exports
 from Transformer import run as transform_exports
 from To_Sharepoint import main as upload_to_sharepoint
-from odoo_export import main as export_for_odoo
 
 
 def main():
-    """Run the full pipeline: scrape -> transform -> upload to SharePoint."""
+    """Run the full pipeline: scrape -> validate -> transform -> upload to SharePoint."""
     load_dotenv()
 
     print("=" * 60)
@@ -32,58 +31,32 @@ def main():
     skip_validation = os.getenv("SKIP_VALIDATION", "false").lower() in ("true", "1", "yes")
     if not skip_validation:
         print("\n" + "=" * 60)
-        print("Step 1.5/4: Validating downloaded exports...")
+        print("Step 2/4: Validating downloaded exports...")
         print("=" * 60)
         validate_exports(exports_dir="exports", strict=True)
     else:
         print("\n" + "=" * 60)
-        print("Step 1.5/4: Skipped export validation (SKIP_VALIDATION=true)...")
+        print("Step 2/4: Skipped export validation (SKIP_VALIDATION=true)...")
         print("=" * 60)
 
     print("\n" + "=" * 60)
-    print("Step 2/4: Transforming and cleaning exports...")
+    print("Step 3/4: Transforming and cleaning exports...")
     print("=" * 60)
     transform_exports()
-
-    # Odoo file first, from the local cleaned file; the raw upload below is what the Fabric
-    # loader picks up and later removes. Each step is attempted even if the other fails.
-    failures = []
-
-    skip_odoo = os.getenv("SKIP_ODOO_EXPORT", "false").lower() in ("true", "1", "yes")
-    odoo_folder = os.getenv("TARGET_FOLDER_PATH_ODOO") or "SKIDATA - Odoo"
-    if not skip_odoo:
-        print("\n" + "=" * 60)
-        print(f"Step 3/4: Building and uploading the Odoo file ({odoo_folder})...")
-        print("=" * 60)
-        try:
-            export_for_odoo()
-        except (Exception, SystemExit) as exc:
-            print(f"Odoo export failed: {exc!r}")
-            failures.append("odoo export")
-    else:
-        print("\n" + "=" * 60)
-        print("Step 3/4: Skipped Odoo export (SKIP_ODOO_EXPORT=true)...")
-        print("=" * 60)
 
     target_folder = os.getenv("TARGET_FOLDER_PATH") or "Ski Data 5"
     if target_folder == "Skidata_Daily_Files":
         print("SAFETY GUARDRAIL: Blocked upload to 'Skidata_Daily_Files' on dev. Redirecting to 'Ski Data 5'.")
         target_folder = "Ski Data 5"
         os.environ["TARGET_FOLDER_PATH"] = "Ski Data 5"
+
     print("\n" + "=" * 60)
     print(f"Step 4/4: Uploading to SharePoint ({target_folder})...")
     print("=" * 60)
-    try:
-        upload_to_sharepoint()
-    except (Exception, SystemExit) as exc:
-        print(f"Raw upload failed: {exc!r}")
-        failures.append("raw upload")
-
-    if failures:
-        raise SystemExit("Pipeline step(s) failed: " + ", ".join(failures))
+    upload_to_sharepoint()
 
     print("\n" + "=" * 60)
-    print("Pipeline complete.")
+    print("Pipeline complete: All reports uploaded to SharePoint.")
     print("=" * 60)
 
 
