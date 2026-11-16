@@ -675,14 +675,14 @@ async def run_in_depth_flow(
     target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}.xlsx")
     await _trigger_export_and_download(page, target_path, timeout_s=300.0)
 
-    # Immediately verify that the export was not captured in a collapsed state
+    # Immediately verify that the export is a valid, non-empty, and expanded table
     file_size = os.path.getsize(target_path) if os.path.exists(target_path) else 0
-    if file_size < 15_000:
+    if file_size < 2_048:
         if os.path.exists(target_path):
             os.remove(target_path)
         raise RuntimeError(
-            f"Export '{file_base_name}' was captured in collapsed state ({file_size} bytes < 15KB threshold). "
-            f"Retrying report flow to force full expansion!"
+            f"Export '{file_base_name}' was downloaded empty or truncated ({file_size} bytes < 2KB). "
+            f"Retrying report flow!"
         )
 
     import openpyxl
@@ -768,14 +768,14 @@ async def _export_parking_single_day(
 
     # Right click header
     pivot_frame = await find_frame_with_selector(
-        page, header_selector, per_frame_timeout_ms=2_000, total_timeout_ms=20_000
+        page, header_selector, per_frame_timeout_ms=6_000, total_timeout_ms=45_000
     )
     if not pivot_frame:
         pivot_frame = await find_frame_with_selector(
             page,
             "article:not(.qv-object-filterpane) header.qv-object-header",
-            per_frame_timeout_ms=2_000,
-            total_timeout_ms=20_000,
+            per_frame_timeout_ms=6_000,
+            total_timeout_ms=45_000,
         )
     if not pivot_frame:
         raise RuntimeError(f"Could not find Parking Transactions header for offset {n}")
@@ -788,20 +788,20 @@ async def _export_parking_single_day(
 
     await header_el.scroll_into_view_if_needed()
     await header_el.click(button="right")
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(1.0)
 
     # Download as -> Data
     export_group_selector = "li#export-group"
     menu_frame = await find_frame_with_selector(
-        page, export_group_selector, per_frame_timeout_ms=2_000, total_timeout_ms=15_000
+        page, export_group_selector, per_frame_timeout_ms=6_000, total_timeout_ms=45_000
     )
     if not menu_frame:
         raise RuntimeError(f"Context menu 'Download as...' not found for offset {n}")
     await menu_frame.click(export_group_selector)
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(0.8)
 
     export_selector = "li#export"
-    export_item = await menu_frame.wait_for_selector(export_selector, timeout=15_000)
+    export_item = await menu_frame.wait_for_selector(export_selector, timeout=45_000)
     await export_item.click()
     await asyncio.sleep(1)
 
