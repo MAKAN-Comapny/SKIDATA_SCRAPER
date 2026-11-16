@@ -526,8 +526,17 @@ async def run_in_depth_flow(
     await asyncio.sleep(0.8)
 
     expand_all_el = await menu_frame.wait_for_selector(expand_all_selector, timeout=60_000)
+    await expand_all_el.scroll_into_view_if_needed()
     await expand_all_el.click()
-    await asyncio.sleep(2)
+    print("Clicked 'Expand all'. Waiting for Qlik Sense pivot table calculation to complete...")
+
+    # Give the table adequate time to expand all nested dimensions (especially on multi-day ranges)
+    await asyncio.sleep(8)
+    for _ in range(12):
+        busy = await _find_visible_element_across_all(page, [".qv-busy", "[aria-busy='true']", ".lui-spinner"])
+        if busy is None:
+            break
+        await asyncio.sleep(1.0)
 
     # 5) Open context menu again and choose Download as... -> Data
     print("Opening context menu again for export...")
@@ -550,6 +559,38 @@ async def run_in_depth_flow(
     date_prefix = selected_date.strftime("%d-%b-%y")  # e.g. 15-Feb-26
     target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}.xlsx")
     await _trigger_export_and_download(page, target_path, timeout_s=300.0)
+
+    # Immediately verify that the export was not captured in a collapsed state
+    file_size = os.path.getsize(target_path) if os.path.exists(target_path) else 0
+    if file_size < 15_000:
+        if os.path.exists(target_path):
+            os.remove(target_path)
+        raise RuntimeError(
+            f"Export '{file_base_name}' was captured in collapsed state ({file_size} bytes < 15KB threshold). "
+            f"Retrying report flow to force full expansion!"
+        )
+
+    import openpyxl
+    try:
+        wb_check = openpyxl.load_workbook(target_path, read_only=True)
+        ws_check = wb_check.active
+        rows_iter = ws_check.iter_rows(values_only=True)
+        r1 = [str(c).strip() for c in next(rows_iter, []) if c is not None]
+        r2 = [str(c).strip() for c in next(rows_iter, []) if c is not None] if ws_check.max_row > 1 else []
+        wb_check.close()
+        headers = r1 + r2
+        if "Date" not in headers:
+            if os.path.exists(target_path):
+                os.remove(target_path)
+            raise RuntimeError(
+                f"Export '{file_base_name}' missing required 'Date' column (found: {r1}). "
+                f"Pivot table was not fully expanded. Retrying report flow!"
+            )
+    except Exception as check_exc:
+        if "missing required 'Date' column" in str(check_exc) or "collapsed state" in str(check_exc):
+            raise
+        print(f"Notice: Header check on {file_base_name}: {check_exc}")
+
     print(f"Exports folder (for upload): {os.path.abspath(download_dir)}")
 
 

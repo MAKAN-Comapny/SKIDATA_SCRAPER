@@ -6,6 +6,9 @@ on:
     - cron: "50 5 * * *"
     # Run 2: 09:00 UTC = 12:00 PM (Noon) Saudi Time (AST) / 02:30 PM IST (Midday Refresh)
     - cron: "0 9 * * *"
+  repository_dispatch:
+    # External cron (cron-job.org) trigger support
+    types: [manual-trigger]
   workflow_dispatch:
     # Allow manual trigger from GitHub Actions tab
     inputs:
