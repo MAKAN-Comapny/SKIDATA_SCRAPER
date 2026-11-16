@@ -336,8 +336,14 @@ def validate_parking_sheet(
         exp = next(iter(expected_dates))
         if exp not in dates_found:
             res.errors.append(f"Parking Transactions does not contain expected date {exp}. Found: {dates_found}")
-        if res.unexpected_dates:
-            res.errors.append(f"Found unexpected transaction dates in single-day export: {res.unexpected_dates}")
+        # Any future dates beyond expected date are fatal
+        future_dates = {d for d in dates_found if d > exp}
+        if future_dates:
+            res.errors.append(f"Fatal: Found future dates in Parking Transactions: {future_dates}")
+        # Past boundary dates (e.g. overnight parking exits / midnight cashier shifts) are warnings, not fatal
+        past_dates = {d for d in res.unexpected_dates if d < exp}
+        if past_dates:
+            res.warnings.append(f"Notice: Found past boundary date(s) in single-day export (e.g. overnight parking exits): {sorted(list(past_dates))}")
     else:
         if res.missing_days:
             res.warnings.append(f"Missing {len(res.missing_days)} day(s) in Parking Transactions: {sorted(list(res.missing_days))}")
