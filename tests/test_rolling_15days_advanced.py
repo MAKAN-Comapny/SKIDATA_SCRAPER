@@ -338,6 +338,84 @@ class TestRolling15DaysAdvanced(unittest.TestCase):
         self.assertFalse(os.path.exists(out))
         self.assertFalse(os.path.exists(f"{out}.tmp.xlsx"))
 
+    # 16. Date Prefix Nomenclature: Multi-Day Range vs Single Day
+    def test_get_report_file_prefix_nomenclature(self):
+        from scraper import get_report_file_prefix
+        target = date(2026, 11, 16)
+
+        # Single day
+        self.assertEqual(get_report_file_prefix(target, days_count=1), "16-Nov-26")
+        self.assertEqual(get_report_file_prefix(target, days_count=0), "16-Nov-26")
+
+        # 15 days rolling range ending on Nov 16
+        self.assertEqual(get_report_file_prefix(target, days_count=15), "02-Nov-26-to-16-Nov-26")
+
+        # 5 days rolling range ending on Nov 16
+        self.assertEqual(get_report_file_prefix(target, days_count=5), "12-Nov-26-to-16-Nov-26")
+
+    # 17. Filename Prefix Extraction & Consistency
+    def test_extract_file_prefix_and_multi_day_validation(self):
+        from validator import extract_file_prefix, validate_exports
+        from scraper import get_report_file_prefix
+
+        end_d = date(2026, 11, 16)
+        prefix = get_report_file_prefix(end_d, days_count=15)
+        self.assertEqual(prefix, "02-Nov-26-to-16-Nov-26")
+
+        # Verify extract_file_prefix
+        self.assertEqual(
+            extract_file_prefix(f"{prefix}-Parking-Transactions.xlsx"),
+            "02-Nov-26-to-16-Nov-26",
+        )
+        self.assertEqual(
+            extract_file_prefix("16-Nov-26-Parking-Transactions.xlsx"),
+            "16-Nov-26",
+        )
+        self.assertEqual(
+            extract_file_prefix(f"{prefix}-Revenue-In-Depth.xlsx"),
+            "02-Nov-26-to-16-Nov-26",
+        )
+
+        # Create 4 files with range nomenclature
+        for sheet in ["Parking-Transactions", "Revenue-In-Depth", "Access-In-Depth", "System-Event-In-Depth"]:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            if sheet == "Parking-Transactions":
+                ws.append(["Transaction Date/Time", "Entry Date/Time", "Exit Date/Time", "Serial Number", "Payment"])
+                for d in [end_d - timedelta(days=i) for i in range(15)]:
+                    ws.append([
+                        f"{d.strftime('%Y-%m-%d')} 10:00:00",
+                        f"{d.strftime('%Y-%m-%d')} 09:00:00",
+                        f"{d.strftime('%Y-%m-%d')} 10:00:00",
+                        f"TKT-{d.day}",
+                        10.0,
+                    ])
+            elif sheet == "Revenue-In-Depth":
+                ws.append(["Title", "Header"])
+                ws.append(["Date", "Gross", "Net"])
+                for d in [end_d - timedelta(days=i) for i in range(15)]:
+                    ws.append([d.strftime("%Y-%m-%d"), 100.0, 85.0])
+            elif sheet == "Access-In-Depth":
+                ws.append(["Date", "Counting Category"])
+                for d in [end_d - timedelta(days=i) for i in range(15)]:
+                    ws.append([d.strftime("%Y-%m-%d"), "Short Stay"])
+            else:
+                ws.append(["Date", "System Event"])
+                for d in [end_d - timedelta(days=i) for i in range(15)]:
+                    ws.append([d.strftime("%Y-%m-%d"), "Door Open"])
+            wb.save(os.path.join(self.test_dir, f"{prefix}-{sheet}.xlsx"))
+
+        summary = validate_exports(
+            exports_dir=self.test_dir,
+            expected_date=end_d,
+            expected_days=15,
+            strict=False,
+        )
+        self.assertTrue(summary.is_valid)
+        self.assertEqual(len(summary.global_errors), 0)
+        # Verify no inconsistent prefix warning
+        self.assertFalse(any("Inconsistent filename date prefixes" in w for w in summary.global_warnings))
+
 
 if __name__ == "__main__":
     unittest.main()

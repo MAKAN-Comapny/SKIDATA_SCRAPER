@@ -97,6 +97,18 @@ def parse_days_count() -> int:
         return 15
 
 
+def get_report_file_prefix(end_date: date, days_count: int = 1) -> str:
+    """
+    Format date prefix for export files:
+    - Single day (days_count <= 1): '16-Nov-26'
+    - Multi-day range (days_count > 1): '02-Nov-26-to-16-Nov-26'
+    """
+    if days_count <= 1:
+        return end_date.strftime("%d-%b-%y")
+    start_date = end_date - timedelta(days=days_count - 1)
+    return f"{start_date.strftime('%d-%b-%y')}-to-{end_date.strftime('%d-%b-%y')}"
+
+
 def _parse_row_date(text: str) -> Optional[date]:
     """Date filter rows read like 10/22/2026 (month/day/year)."""
     try:
@@ -671,7 +683,9 @@ async def run_in_depth_flow(
     await export_item.click()
 
     # 6) Wait for export to generate, then find and click the download link
-    date_prefix = selected_date.strftime("%d-%b-%y")  # e.g. 15-Feb-26
+    target_date = parse_target_date()
+    days_count = parse_days_count() if target_date is None else 1
+    date_prefix = get_report_file_prefix(selected_date, days_count)
     target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}.xlsx")
     await _trigger_export_and_download(page, target_path, timeout_s=300.0)
 
@@ -882,7 +896,7 @@ async def run_parking_transactions_flow(
     target_date = parse_target_date()
     days_count = parse_days_count() if target_date is None else 1
     yesterday = get_expected_yesterday()
-    date_prefix = (target_date or yesterday).strftime("%d-%b-%y")
+    date_prefix = get_report_file_prefix(target_date or yesterday, days_count)
     target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}.xlsx")
     os.makedirs(download_dir, exist_ok=True)
 
@@ -900,7 +914,7 @@ async def run_parking_transactions_flow(
                 list_frame, listbox_base, expected_yesterday=yesterday, page=page
             )
         if detected_date is not None:
-            date_prefix = detected_date.strftime("%d-%b-%y")
+            date_prefix = get_report_file_prefix(detected_date, 1)
             target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}.xlsx")
         single_temp = await _export_parking_single_day(
             page, list_frame, listbox_base, n=start_offset, prev_n=None, download_dir=download_dir, header_selector=header_selector
@@ -922,7 +936,7 @@ async def run_parking_transactions_flow(
             list_frame, listbox_base, expected_yesterday=yesterday, page=page
         )
         if detected_date is not None:
-            date_prefix = detected_date.strftime("%d-%b-%y")
+            date_prefix = get_report_file_prefix(detected_date, days_count)
             target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}.xlsx")
 
         for idx, n in enumerate(range(start_offset, start_offset + days_count), start=1):

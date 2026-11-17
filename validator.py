@@ -75,6 +75,16 @@ def get_expected_yesterday() -> date:
     return (get_ast_now() - timedelta(days=1)).date()
 
 
+def extract_file_prefix(filename: str) -> str:
+    """Extract date prefix from report filename, e.g. '16-Nov-26' or '02-Nov-26-to-16-Nov-26'."""
+    base = os.path.basename(filename)
+    for marker in ("Parking-Transactions", "Revenue-In-Depth", "Access-In-Depth", "System-Event-In-Depth"):
+        if marker in base:
+            idx = base.find(marker)
+            return base[:idx].rstrip("-_ ")
+    return base.split("-")[0] if "-" in base else ""
+
+
 def parse_flexible_date(val: any) -> Optional[date]:
     """Parse mixed date representations into a python datetime.date object."""
     if val is None or pd.isna(val):
@@ -412,11 +422,11 @@ def validate_exports(
             matches.sort(key=os.path.getmtime)
             found_files[key] = matches[-1]
             base = os.path.basename(matches[-1])
-            date_prefixes.add(base.split("-")[0] if "-" in base else "")
+            date_prefixes.add(extract_file_prefix(base))
         else:
             found_files[key] = matches[0]
             base = os.path.basename(matches[0])
-            date_prefixes.add(base.split("-")[0] if "-" in base else "")
+            date_prefixes.add(extract_file_prefix(base))
 
     if len(found_files) < 4:
         summary.is_valid = False
