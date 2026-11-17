@@ -1,11 +1,12 @@
 name: SKIDATA Scraper
 
 on:
-  schedule:
-    # Run 1: 05:50 UTC = 08:50 AM Saudi Time (AST) / 11:20 AM IST (Production Daily)
-    - cron: "50 5 * * *"
-    # Run 2: 09:00 UTC = 12:00 PM (Noon) Saudi Time (AST) / 02:30 PM IST (Midday Refresh)
-    - cron: "0 9 * * *"
+  # schedule:
+  #   # Disabled in favor of reliable external cron-job.org triggers (avoids GitHub Actions queue delay)
+  #   # Run 1: 05:50 UTC = 08:50 AM Saudi Time (AST) / 11:20 AM IST (Production Daily)
+  #   - cron: "50 5 * * *"
+  #   # Run 2: 09:00 UTC = 12:00 PM (Noon) Saudi Time (AST) / 02:30 PM IST (Midday Refresh)
+  #   - cron: "0 9 * * *"
   repository_dispatch:
     # External cron (cron-job.org) trigger support
     types: [manual-trigger]
