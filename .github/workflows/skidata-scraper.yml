@@ -31,11 +31,12 @@ on:
   repository_dispatch:
     # Allows external triggers (e.g. cron-job.org) via GitHub API
     types: [manual-trigger]
-  schedule:
-    # Run 1: 05:00 UTC = 08:00 AM Saudi Time (AST) / 10:30 AM IST (50m before daily scraper)
-    - cron: "0 5 * * *"
-    # Run 2: 09:45 UTC = 12:45 PM Saudi Time (AST) / 03:15 PM IST (45m after midday daily)
-    - cron: "45 9 * * *"
+  # schedule:
+  #   # Disabled in favor of reliable external cron-job.org triggers (avoids GitHub Actions queue delay)
+  #   # Run 1: 05:00 UTC = 08:00 AM Saudi Time (AST) / 10:30 AM IST (50m before daily scraper)
+  #   - cron: "0 5 * * *"
+  #   # Run 2: 09:45 UTC = 12:45 PM Saudi Time (AST) / 03:15 PM IST (45m after midday daily)
+  #   - cron: "45 9 * * *"
 
 concurrency:
   group: skidata-scraper
