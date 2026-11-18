@@ -100,13 +100,9 @@ def parse_days_count() -> int:
 def get_report_file_prefix(end_date: date, days_count: int = 1) -> str:
     """
     Format date prefix for export files:
-    - Single day (days_count <= 1): '16-Nov-26'
-    - Multi-day range (days_count > 1): '02-Nov-26-to-16-Nov-26'
+    - Always uses the latest date (e.g. '17-Nov-26') representing the window ending on that day.
     """
-    if days_count <= 1:
-        return end_date.strftime("%d-%b-%y")
-    start_date = end_date - timedelta(days=days_count - 1)
-    return f"{start_date.strftime('%d-%b-%y')}-to-{end_date.strftime('%d-%b-%y')}"
+    return end_date.strftime("%d-%b-%y")
 
 
 def _parse_row_date(text: str) -> Optional[date]:

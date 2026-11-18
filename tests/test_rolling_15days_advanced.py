@@ -338,7 +338,7 @@ class TestRolling15DaysAdvanced(unittest.TestCase):
         self.assertFalse(os.path.exists(out))
         self.assertFalse(os.path.exists(f"{out}.tmp.xlsx"))
 
-    # 16. Date Prefix Nomenclature: Multi-Day Range vs Single Day
+    # 16. Date Prefix Nomenclature: Latest Date
     def test_get_report_file_prefix_nomenclature(self):
         from scraper import get_report_file_prefix
         target = date(2026, 11, 16)
@@ -347,11 +347,9 @@ class TestRolling15DaysAdvanced(unittest.TestCase):
         self.assertEqual(get_report_file_prefix(target, days_count=1), "16-Nov-26")
         self.assertEqual(get_report_file_prefix(target, days_count=0), "16-Nov-26")
 
-        # 15 days rolling range ending on Nov 16
-        self.assertEqual(get_report_file_prefix(target, days_count=15), "02-Nov-26-to-16-Nov-26")
-
-        # 5 days rolling range ending on Nov 16
-        self.assertEqual(get_report_file_prefix(target, days_count=5), "12-Nov-26-to-16-Nov-26")
+        # Rolling range ending on Nov 16 uses the latest date
+        self.assertEqual(get_report_file_prefix(target, days_count=15), "16-Nov-26")
+        self.assertEqual(get_report_file_prefix(target, days_count=5), "16-Nov-26")
 
     # 17. Filename Prefix Extraction & Consistency
     def test_extract_file_prefix_and_multi_day_validation(self):
@@ -360,12 +358,12 @@ class TestRolling15DaysAdvanced(unittest.TestCase):
 
         end_d = date(2026, 11, 16)
         prefix = get_report_file_prefix(end_d, days_count=15)
-        self.assertEqual(prefix, "02-Nov-26-to-16-Nov-26")
+        self.assertEqual(prefix, "16-Nov-26")
 
         # Verify extract_file_prefix
         self.assertEqual(
             extract_file_prefix(f"{prefix}-Parking-Transactions.xlsx"),
-            "02-Nov-26-to-16-Nov-26",
+            "16-Nov-26",
         )
         self.assertEqual(
             extract_file_prefix("16-Nov-26-Parking-Transactions.xlsx"),
@@ -373,6 +371,10 @@ class TestRolling15DaysAdvanced(unittest.TestCase):
         )
         self.assertEqual(
             extract_file_prefix(f"{prefix}-Revenue-In-Depth.xlsx"),
+            "16-Nov-26",
+        )
+        self.assertEqual(
+            extract_file_prefix("02-Nov-26-to-16-Nov-26-Revenue-In-Depth.xlsx"),
             "02-Nov-26-to-16-Nov-26",
         )
 
