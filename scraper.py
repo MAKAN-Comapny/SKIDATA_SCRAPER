@@ -97,12 +97,37 @@ def parse_days_count() -> int:
         return 15
 
 
-def get_report_file_prefix(end_date: date, days_count: int = 1) -> str:
+def get_run_period_tag() -> str:
+    """
+    Determine run period based on Saudi Arabia Standard Time (AST = UTC+3):
+    - Before 12:00 PM AST -> 'Morning'
+    - 12:00 PM to 4:59 PM AST -> '12Noon'
+    - 5:00 PM AST onwards -> 'Evening'
+    Can be overridden via RUN_TAG env var (e.g. 'Morning', 'Evening', '12Noon', or 'none').
+    """
+    override = os.getenv("RUN_TAG", "").strip()
+    if override:
+        return "" if override.lower() in ("none", "false", "off", "0") else override
+    ast_hour = get_ast_now().hour
+    if ast_hour < 12:
+        return "Morning"
+    elif ast_hour < 17:
+        return "12Noon"
+    else:
+        return "Evening"
+
+
+def get_report_file_prefix(end_date: date, days_count: int = 1, include_period: bool = True) -> str:
     """
     Format date prefix for export files:
-    - Always uses the latest date (e.g. '17-Nov-26') representing the window ending on that day.
+    - Uses the latest date and separates Morning/Evening runs:
+      e.g. '17-Nov-26-Morning' or '17-Nov-26-Evening'
     """
-    return end_date.strftime("%d-%b-%y")
+    date_str = end_date.strftime("%d-%b-%y")
+    if not include_period:
+        return date_str
+    tag = get_run_period_tag()
+    return f"{date_str}-{tag}" if tag else date_str
 
 
 def _parse_row_date(text: str) -> Optional[date]:

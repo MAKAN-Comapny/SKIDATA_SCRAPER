@@ -338,18 +338,28 @@ class TestRolling15DaysAdvanced(unittest.TestCase):
         self.assertFalse(os.path.exists(out))
         self.assertFalse(os.path.exists(f"{out}.tmp.xlsx"))
 
-    # 16. Date Prefix Nomenclature: Latest Date
+    # 16. Date Prefix Nomenclature: Latest Date & Run Period Tag (Morning / Evening / 12Noon)
     def test_get_report_file_prefix_nomenclature(self):
-        from scraper import get_report_file_prefix
+        from scraper import get_report_file_prefix, get_run_period_tag
         target = date(2026, 11, 16)
 
-        # Single day
-        self.assertEqual(get_report_file_prefix(target, days_count=1), "16-Nov-26")
-        self.assertEqual(get_report_file_prefix(target, days_count=0), "16-Nov-26")
+        # Period tag override via environment variable
+        os.environ["RUN_TAG"] = "Morning"
+        try:
+            self.assertEqual(get_run_period_tag(), "Morning")
+            self.assertEqual(get_report_file_prefix(target, days_count=1), "16-Nov-26-Morning")
+            self.assertEqual(get_report_file_prefix(target, days_count=15), "16-Nov-26-Morning")
+            self.assertEqual(get_report_file_prefix(target, days_count=5), "16-Nov-26-Morning")
+            self.assertEqual(get_report_file_prefix(target, days_count=5, include_period=False), "16-Nov-26")
+        finally:
+            os.environ.pop("RUN_TAG", None)
 
-        # Rolling range ending on Nov 16 uses the latest date
-        self.assertEqual(get_report_file_prefix(target, days_count=15), "16-Nov-26")
-        self.assertEqual(get_report_file_prefix(target, days_count=5), "16-Nov-26")
+        os.environ["RUN_TAG"] = "Evening"
+        try:
+            self.assertEqual(get_run_period_tag(), "Evening")
+            self.assertEqual(get_report_file_prefix(target, days_count=15), "16-Nov-26-Evening")
+        finally:
+            os.environ.pop("RUN_TAG", None)
 
     # 17. Filename Prefix Extraction & Consistency
     def test_extract_file_prefix_and_multi_day_validation(self):
@@ -357,20 +367,24 @@ class TestRolling15DaysAdvanced(unittest.TestCase):
         from scraper import get_report_file_prefix
 
         end_d = date(2026, 11, 16)
-        prefix = get_report_file_prefix(end_d, days_count=15)
+        prefix = get_report_file_prefix(end_d, days_count=15, include_period=False)
         self.assertEqual(prefix, "16-Nov-26")
 
-        # Verify extract_file_prefix
+        # Verify extract_file_prefix handles morning, evening, noon, and raw formats
         self.assertEqual(
-            extract_file_prefix(f"{prefix}-Parking-Transactions.xlsx"),
-            "16-Nov-26",
+            extract_file_prefix("16-Nov-26-Morning-Parking-Transactions.xlsx"),
+            "16-Nov-26-Morning",
+        )
+        self.assertEqual(
+            extract_file_prefix("16-Nov-26-Evening-Parking-Transactions.xlsx"),
+            "16-Nov-26-Evening",
+        )
+        self.assertEqual(
+            extract_file_prefix("16-Nov-26-12Noon-Parking-Transactions.xlsx"),
+            "16-Nov-26-12Noon",
         )
         self.assertEqual(
             extract_file_prefix("16-Nov-26-Parking-Transactions.xlsx"),
-            "16-Nov-26",
-        )
-        self.assertEqual(
-            extract_file_prefix(f"{prefix}-Revenue-In-Depth.xlsx"),
             "16-Nov-26",
         )
         self.assertEqual(
