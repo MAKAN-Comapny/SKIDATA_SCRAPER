@@ -88,13 +88,13 @@ def parse_target_date() -> Optional[date]:
 
 
 def parse_days_count() -> int:
-    """DAYS_COUNT specifies how many rolling past days to fetch (default: 5)."""
-    raw = os.getenv("DAYS_COUNT", "5").strip()
+    """DAYS_COUNT specifies how many rolling past days to fetch (default: 15)."""
+    raw = os.getenv("DAYS_COUNT", "15").strip()
     try:
         val = int(raw)
         return max(1, val)
     except ValueError:
-        return 5
+        return 15
 
 
 def get_run_period_tag() -> str:
@@ -308,9 +308,11 @@ async def _scroll_listbox_down(
                     """el => {
                         let p = el.parentElement;
                         while (p) {
-                            const before = p.scrollTop;
-                            p.scrollTop = before + 320;
-                            if (p.scrollTop > before) return true;
+                            if (p.scrollHeight > p.clientHeight) {
+                                const before = p.scrollTop;
+                                p.scrollTop = before + 280;
+                                if (p.scrollTop > before) return true;
+                            }
                             p = p.parentElement;
                         }
                         return false;
@@ -331,15 +333,19 @@ async def _scroll_listbox_down(
                 box = await items[len(items) // 2].bounding_box()
                 if box:
                     await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                    await page.mouse.wheel(0, 450)
+                    await page.mouse.wheel(0, 350)
             except Exception:
                 pass
 
     if not scrolled_by_dom:
         try:
             await list_frame.eval_on_selector(
-                "div.RowColumn-scrollContainer, div.lui-virtual-scroll, div.lui-list, div[role='listbox']",
-                "el => el.scrollBy(0, 320)",
+                "div.RowColumn-barContainer, div.RowColumn-scrollContainer, div.lui-virtual-scroll, div.lui-list, div[role='listbox']",
+                """el => {
+                    const before = el.scrollTop;
+                    el.scrollTop = before + 280;
+                    return el.scrollTop > before;
+                }""",
             )
         except Exception:
             pass
@@ -368,7 +374,10 @@ async def _find_listbox_item_by_offset(
             stagnant += 1
             if page is not None and stagnant in (2, 4):
                 try:
-                    await page.keyboard.press("PageDown")
+                    if items:
+                        await items[-1].scroll_into_view_if_needed()
+                        await items[-1].focus()
+                    await page.keyboard.press("ArrowDown")
                 except Exception:
                     pass
             if stagnant >= 6:

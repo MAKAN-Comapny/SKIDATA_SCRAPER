@@ -433,14 +433,14 @@ class TestRolling15DaysAdvanced(unittest.TestCase):
         # Verify no inconsistent prefix warning
         self.assertFalse(any("Inconsistent filename date prefixes" in w for w in summary.global_warnings))
 
-    def test_parse_days_count_defaults_to_5(self):
+    def test_parse_days_count_defaults_to_15(self):
         from scraper import parse_days_count
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(parse_days_count(), 5)
-        with patch.dict(os.environ, {"DAYS_COUNT": "15"}):
             self.assertEqual(parse_days_count(), 15)
-        with patch.dict(os.environ, {"DAYS_COUNT": "invalid"}):
+        with patch.dict(os.environ, {"DAYS_COUNT": "5"}):
             self.assertEqual(parse_days_count(), 5)
+        with patch.dict(os.environ, {"DAYS_COUNT": "invalid"}):
+            self.assertEqual(parse_days_count(), 15)
 
 
 
