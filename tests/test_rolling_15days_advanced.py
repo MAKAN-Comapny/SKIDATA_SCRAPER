@@ -12,6 +12,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import openpyxl
 import pandas as pd
@@ -431,6 +432,16 @@ class TestRolling15DaysAdvanced(unittest.TestCase):
         self.assertEqual(len(summary.global_errors), 0)
         # Verify no inconsistent prefix warning
         self.assertFalse(any("Inconsistent filename date prefixes" in w for w in summary.global_warnings))
+
+    def test_parse_days_count_defaults_to_5(self):
+        from scraper import parse_days_count
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(parse_days_count(), 5)
+        with patch.dict(os.environ, {"DAYS_COUNT": "15"}):
+            self.assertEqual(parse_days_count(), 15)
+        with patch.dict(os.environ, {"DAYS_COUNT": "invalid"}):
+            self.assertEqual(parse_days_count(), 5)
+
 
 
 if __name__ == "__main__":

@@ -88,13 +88,13 @@ def parse_target_date() -> Optional[date]:
 
 
 def parse_days_count() -> int:
-    """DAYS_COUNT specifies how many rolling past days to fetch (default: 15)."""
-    raw = os.getenv("DAYS_COUNT", "15").strip()
+    """DAYS_COUNT specifies how many rolling past days to fetch (default: 5)."""
+    raw = os.getenv("DAYS_COUNT", "5").strip()
     try:
         val = int(raw)
         return max(1, val)
     except ValueError:
-        return 15
+        return 5
 
 
 def get_run_period_tag() -> str:
@@ -545,19 +545,57 @@ async def select_report_date(
         print(f"Successfully selected {selected_count} day(s) in Date filter.")
 
     # Confirm selection
-    confirm_button_selector = (
-        "button[data-testid='actions-toolbar-confirm'][title='Confirm selection']"
-    )
-    confirm_frame = await find_frame_with_selector(
-        page, confirm_button_selector, per_frame_timeout_ms=5_000
-    )
-    if confirm_frame is not None:
-        print("Clicking Confirm selection button...")
-        await confirm_frame.click(confirm_button_selector)
-    elif confirm_required:
-        raise RuntimeError("Confirm selection button not found.")
-    else:
-        await page.keyboard.press("Escape")
+    confirm_selectors = [
+        "button[data-testid='actions-toolbar-confirm'][title='Confirm selection']",
+        "button[data-testid='actions-toolbar-confirm']",
+        "button[title='Confirm selection']",
+        "button[title*='Confirm']",
+        "button.actions-toolbar-confirm",
+        "button.lui-button:has(.lui-icon--tick)",
+        "button.lui-button:has(.lui-icon--check)",
+        ".lui-popover button[title*='Confirm']",
+        "button:has(.lui-icon--tick)",
+        "button:has(.lui-icon--check)",
+        "button.lui-button.lui-button--success",
+    ]
+    confirmed = False
+    confirm_element = await _find_visible_element_across_all(page, confirm_selectors)
+    if confirm_element is not None:
+        btn, _ = confirm_element
+        try:
+            print("Clicking Confirm selection button...")
+            await btn.click()
+            confirmed = True
+        except Exception as exc:
+            print(f"Warning: Failed clicking confirm button: {exc}")
+
+    if not confirmed:
+        for sel in confirm_selectors[:4]:
+            confirm_frame = await find_frame_with_selector(
+                page, sel, per_frame_timeout_ms=1_500, total_timeout_ms=3_000
+            )
+            if confirm_frame is not None:
+                try:
+                    await confirm_frame.click(sel)
+                    confirmed = True
+                    print(f"Confirmed selection via frame click ({sel}).")
+                    break
+                except Exception:
+                    pass
+
+    if not confirmed:
+        print("Confirm button not found; pressing Enter to commit selection...")
+        try:
+            await page.keyboard.press("Enter")
+            confirmed = True
+        except Exception:
+            pass
+
+    if not confirmed:
+        if confirm_required:
+            raise RuntimeError("Confirm selection button not found.")
+        else:
+            await page.keyboard.press("Escape")
     await asyncio.sleep(0.5)
     return row_date
 
