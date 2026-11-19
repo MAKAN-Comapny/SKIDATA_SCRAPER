@@ -678,6 +678,34 @@ async def run_parking_transactions_flow(
     await pivot_header.click(button="right")
     await asyncio.sleep(0.5)
 
+    print("Choosing 'Expand / collapse' -> 'Expand all'...")
+    expand_group_selector = "li#expand-collapse-group"
+    expand_all_selector = "li#expand-all"
+
+    menu_frame = await find_frame_with_selector(page, expand_group_selector)
+    if menu_frame is None:
+        raise RuntimeError("Context menu 'Expand / collapse' item not found in any frame.")
+    await menu_frame.click(expand_group_selector)
+    await asyncio.sleep(0.8)
+
+    expand_all_el = await menu_frame.wait_for_selector(expand_all_selector, timeout=60_000)
+    await expand_all_el.scroll_into_view_if_needed()
+    await expand_all_el.click()
+    print("Clicked 'Expand all'. Waiting for Qlik Sense pivot table calculation to complete...")
+
+    # Give the table adequate time to expand all nested dimensions
+    await asyncio.sleep(8)
+    for _ in range(12):
+        busy = await _find_visible_element_across_all(page, [".qv-busy", "[aria-busy='true']", ".lui-spinner"])
+        if busy is None:
+            break
+        await asyncio.sleep(1.0)
+
+    # 4) Open context menu again and choose Download as... -> Data
+    print("Opening context menu again for export...")
+    await pivot_header.click(button="right")
+    await asyncio.sleep(0.5)
+
     export_group_selector = "li#export-group"
     export_selector = "li#export"
     menu_frame = await find_frame_with_selector(page, export_group_selector)
@@ -689,10 +717,21 @@ async def run_parking_transactions_flow(
     await export_item.click()
     await asyncio.sleep(0.5)
 
-    # 4) Trigger export and wait for download
+    # 5) Trigger export and wait for download
     date_prefix = selected_date.strftime("%d-%b-%y")  # e.g. 15-Feb-26
     target_path = os.path.join(download_dir, f"{date_prefix}-{file_base_name}.xlsx")
     await _trigger_export_and_download(page, target_path, timeout_s=300.0)
+
+    # Immediately verify that the export is a valid, non-empty, and expanded table
+    file_size = os.path.getsize(target_path) if os.path.exists(target_path) else 0
+    if file_size < 2_048:
+        if os.path.exists(target_path):
+            os.remove(target_path)
+        raise RuntimeError(
+            f"Export '{file_base_name}' was downloaded empty or truncated ({file_size} bytes < 2KB). "
+            f"Retrying report flow!"
+        )
+
     print(f"Exports folder (for upload): {os.path.abspath(download_dir)}")
 
 
