@@ -1,17 +1,18 @@
-name: SKIDATA Scraper
+name: SKIDATA Scraper & 15-Day Reconciliation
 
 on:
   workflow_dispatch:
-    # Allow manual trigger with flexible options
     inputs:
       mode:
-        description: "Option to Run: 'daily' (Last 5 days -> Ski Data 5) or 'historical' (Month/Range -> Validated_Docs)"
+        description: "Option to Run: 'reconcile' (15-day reconciliation), 'daily' (Run reconciliation & scraping), or 'historical'"
         required: false
-        default: "daily"
+        default: "reconcile"
         type: choice
         options:
+          - reconcile
           - daily
           - historical
+          - scrape-only
       month:
         description: "Historical Month: 'both', 'August', 'September', 'Jul', etc. (Used if mode=historical)"
         required: false
@@ -21,22 +22,21 @@ on:
         required: false
         default: ""
       days_count:
-        description: "Daily Script: Number of rolling past days to fetch (default: 15)"
+        description: "Rolling past days to evaluate (default: 15)"
         required: false
         default: "15"
       target_date:
-        description: "Daily Script: Specific single date (YYYY-MM-DD), leave empty for rolling days"
+        description: "Target End Date (YYYY-MM-DD), leave blank for yesterday"
         required: false
         default: ""
+      dry_run:
+        description: "Dry run: Generate reconciliation report without sending email"
+        required: false
+        default: "false"
+
   repository_dispatch:
-    # Allows external triggers (e.g. cron-job.org) via GitHub API
-    types: [manual-trigger]
-  # schedule:
-  #   # Disabled in favor of reliable external cron-job.org triggers (avoids GitHub Actions queue delay)
-  #   # Run 1: 05:00 UTC = 08:00 AM Saudi Time (AST) / 10:30 AM IST (50m before daily scraper)
-  #   - cron: "0 5 * * *"
-  #   # Run 2: 09:45 UTC = 12:45 PM Saudi Time (AST) / 03:15 PM IST (45m after midday daily)
-  #   - cron: "45 9 * * *"
+    # External cron (cron-job.org) trigger support
+    types: [manual-trigger, reconcile-15days-trigger]
 
 concurrency:
   group: skidata-scraper
@@ -60,11 +60,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pyodbc pymssql msal
 
       - name: Install Playwright browsers
         run: playwright install --with-deps chromium
 
-      - name: Run SKIDATA pipeline
+      - name: Run Pipeline
         env:
           HEADLESS: "true"
           TARGET_DATE: ${{ inputs.target_date }}
@@ -80,6 +81,7 @@ jobs:
           CLIENT_ID: ${{ secrets.CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
           SHAREPOINT_SITE_NAME: ${{ secrets.SHAREPOINT_SITE_NAME }}
+          RECON_ALERT_RECIPIENTS: "sumit.dhankhar@makan.sa,karim.essam@makan.sa"
         run: |
           if [ "${{ inputs.mode }}" = "historical" ]; then
             echo "=========================================================="
@@ -91,12 +93,35 @@ jobs:
             else
               python main_backfill.py --month "${{ inputs.month || 'both' }}" --headless
             fi
-          else
+          elif [ "${{ inputs.mode }}" = "scrape-only" ]; then
             echo "=========================================================="
-            echo "RUNNING DAILY SCRIPT (Rolling past days -> Ski Data 5)"
+            echo "RUNNING DAILY SCRAPER ONLY (Ski Data 5)"
             echo "=========================================================="
             python main.py
+          else
+            echo "=========================================================="
+            echo "MAKAN PARKING: 15-DAY RECONCILIATION PIPELINE"
+            echo "Branch: feat/reconcile_15days | Days: ${{ inputs.days_count || 15 }}"
+            echo "Target Recipients: sumit.dhankhar@makan.sa, karim.essam@makan.sa"
+            echo "=========================================================="
+            
+            ARGS="--fresh-scrape --days ${{ inputs.days_count || 15 }}"
+            if [ -n "${{ inputs.target_date }}" ]; then
+              ARGS="$ARGS --target-date ${{ inputs.target_date }}"
+            fi
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              ARGS="$ARGS --dry-run"
+            fi
+            python run_reconcile.py $ARGS
           fi
+
+      - name: Archive reconciliation reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reconciliation-audit-reports
+          path: reconciliation_reports/
+          retention-days: 30
 
       - name: Archive exports and pipeline artifacts
         uses: actions/upload-artifact@v4
@@ -106,5 +131,4 @@ jobs:
           path: |
             exports/
             Cleaned-Exports/
-            Odoo-Exports/
           retention-days: 7

@@ -87,6 +87,12 @@ def main():
             from scraper import login_and_open_portal
             asyncio.run(login_and_open_portal())
             logger.info("Scraper execution completed successfully.")
+            try:
+                from Transformer import run as transform_exports
+                logger.info("Transforming downloaded exports into Cleaned-Exports/...")
+                transform_exports()
+            except Exception as te:
+                logger.info(f"Transform step note (files will be read from exports/): {te}")
         except Exception as e:
             logger.error(f"SkiData scraper failed during fresh scrape: {e}")
             sys.exit(1)
