@@ -106,27 +106,61 @@ class ReconcileEngine:
 
         if not mismatches.empty:
             logger.info("Drilling down into mismatched dates/malls to isolate missing ticket IDs...")
+            # Query Fabric ONCE per distinct date and cache in memory (avoids 75x redundant roundtrips)
+            fabric_tickets_by_date: Dict[date, pd.DataFrame] = {}
+            for d in mismatches["Date"].unique():
+                try:
+                    fabric_tickets_by_date[d] = self.fabric.get_ticket_details(d)
+                except Exception as ef:
+                    logger.warning(f"Could not load ticket details for {d} from Fabric: {ef}")
+                    fabric_tickets_by_date[d] = pd.DataFrame()
+
             for _, row in mismatches.iterrows():
                 row_date = row["Date"]
                 row_mall = row["Mall_Name"]
                 key = f"{row_date} | {row_mall}"
 
                 skidata_tickets = self.skidata.get_ticket_details(row_date, row_mall)
-                fabric_tickets = self.fabric.get_ticket_details(row_date)
+                all_fab_tickets = fabric_tickets_by_date.get(row_date, pd.DataFrame())
 
-                skidata_set = set(skidata_tickets["Ticket_Number"].astype(str).str.strip()) if not skidata_tickets.empty else set()
-                fabric_set = set(fabric_tickets["Ticket_Number"].astype(str).str.strip()) if not fabric_tickets.empty else set()
+                # Filter Fabric tickets for this specific mall
+                if not all_fab_tickets.empty and "Mall_Name" in all_fab_tickets.columns:
+                    fab_for_mall = all_fab_tickets[all_fab_tickets["Mall_Name"] == row_mall]
+                    # If location name mapping differed, use all_fab_tickets as fallback
+                    if fab_for_mall.empty and len(all_fab_tickets) > 0:
+                        fab_for_mall = all_fab_tickets
+                else:
+                    fab_for_mall = all_fab_tickets
+
+                skidata_set = (
+                    set(skidata_tickets["Ticket_Number"].astype(str).str.strip())
+                    if not skidata_tickets.empty else set()
+                )
+                fabric_set = (
+                    set(fab_for_mall["Ticket_Number"].astype(str).str.strip())
+                    if not fab_for_mall.empty else set()
+                )
 
                 # A: In SkiData, Missing in Fabric
                 diff_a = skidata_set - fabric_set
                 if diff_a and not skidata_tickets.empty:
-                    missing_fab_df = skidata_tickets[skidata_tickets["Ticket_Number"].astype(str).isin(diff_a)].copy()
+                    missing_fab_df = skidata_tickets[
+                        skidata_tickets["Ticket_Number"].astype(str).isin(diff_a)
+                    ].copy()
                     missing_in_fabric_dict[key] = missing_fab_df
 
                 # B: In Fabric, Missing in SkiData
+                # Ensure we only compare mall-specific tickets to avoid cross-mall false positives
                 diff_b = fabric_set - skidata_set
-                if diff_b and not fabric_tickets.empty:
-                    missing_ski_df = fabric_tickets[fabric_tickets["Ticket_Number"].astype(str).isin(diff_b)].copy()
+                if diff_b and not fab_for_mall.empty:
+                    if "Mall_Name" in fab_for_mall.columns and (fab_for_mall["Mall_Name"] == row_mall).any():
+                        matched_fab = fab_for_mall[fab_for_mall["Mall_Name"] == row_mall]
+                        diff_b = set(matched_fab["Ticket_Number"].astype(str).str.strip()) - skidata_set
+                        fab_for_mall = matched_fab
+
+                    missing_ski_df = fab_for_mall[
+                        fab_for_mall["Ticket_Number"].astype(str).isin(diff_b)
+                    ].copy()
                     missing_in_skidata_dict[key] = missing_ski_df
 
         # 5. Export to Excel
@@ -137,17 +171,29 @@ class ReconcileEngine:
         with pd.ExcelWriter(report_path, engine="openpyxl") as writer:
             merged.to_excel(writer, sheet_name="Master_Summary", index=False)
             
-            # Combine all missing in fabric rows
+            # Combine all missing in fabric rows (deduplicated & capped to Excel sheet 1,048,576 limit)
             all_missing_fab = [df for df in missing_in_fabric_dict.values() if not df.empty]
             if all_missing_fab:
-                pd.concat(all_missing_fab, ignore_index=True).to_excel(writer, sheet_name="Missing_In_Fabric", index=False)
+                comb_fab = pd.concat(all_missing_fab, ignore_index=True)
+                if "Ticket_Number" in comb_fab.columns:
+                    comb_fab = comb_fab.drop_duplicates(subset=["Ticket_Number"])
+                if len(comb_fab) > 1000000:
+                    logger.warning(f"Capping Missing_In_Fabric from {len(comb_fab)} to 1,000,000 rows (Excel sheet row limit).")
+                    comb_fab = comb_fab.iloc[:1000000]
+                comb_fab.to_excel(writer, sheet_name="Missing_In_Fabric", index=False)
             else:
                 pd.DataFrame({"Note": ["No tickets missing in Fabric."]}).to_excel(writer, sheet_name="Missing_In_Fabric", index=False)
 
-            # Combine all missing in skidata rows
+            # Combine all missing in skidata rows (deduplicated & capped to Excel sheet 1,048,576 limit)
             all_missing_ski = [df for df in missing_in_skidata_dict.values() if not df.empty]
             if all_missing_ski:
-                pd.concat(all_missing_ski, ignore_index=True).to_excel(writer, sheet_name="Missing_In_SkiData", index=False)
+                comb_ski = pd.concat(all_missing_ski, ignore_index=True)
+                if "Ticket_Number" in comb_ski.columns:
+                    comb_ski = comb_ski.drop_duplicates(subset=["Ticket_Number"])
+                if len(comb_ski) > 1000000:
+                    logger.warning(f"Capping Missing_In_SkiData from {len(comb_ski)} to 1,000,000 rows (Excel sheet row limit).")
+                    comb_ski = comb_ski.iloc[:1000000]
+                comb_ski.to_excel(writer, sheet_name="Missing_In_SkiData", index=False)
             else:
                 pd.DataFrame({"Note": ["No extra tickets found in Fabric."]}).to_excel(writer, sheet_name="Missing_In_SkiData", index=False)
 

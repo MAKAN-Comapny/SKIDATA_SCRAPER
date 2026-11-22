@@ -576,6 +576,21 @@ class FabricReader:
 
         loc_filter = f"AND CAST(r.[{loc_c}] AS VARCHAR(100)) = '{location_id}'" if location_id else ""
 
+        # Check if DimLocation or DimMalls exists to map Location_ID to Mall Name
+        mall_join = ""
+        mall_select = f"CAST(r.[{loc_c}] AS VARCHAR(100))"
+        if loc_c and any(term in loc_c.lower() for term in ["id", "code"]):
+            for cand in ["dimlocation", "dim_location", "dimmalls", "dimmall", "dim_mall", "malls"]:
+                if cand in table_map:
+                    dim_table = table_map[cand]
+                    dim_cols = self._get_table_columns(dim_table)
+                    dim_id = _match_column(dim_cols, ["location_id", "locationid", "mall_id", "id", "carpark_id"]) or loc_c
+                    dim_nm = _match_column(dim_cols, ["mall_name", "location_name", "locationname", "carpark_name", "name", "facility"])
+                    if dim_nm:
+                        mall_join = f"LEFT JOIN [{self.schema_name}].[{dim_table}] m ON r.[{loc_c}] = m.[{dim_id}]"
+                        mall_select = f"COALESCE(CAST(m.[{dim_nm}] AS VARCHAR(100)), CAST(r.[{loc_c}] AS VARCHAR(100)))"
+                    break
+
         # Strictly NO 'WITH (NOLOCK)' (illegal in Microsoft Fabric)
         sql = f"""
         SELECT 
@@ -584,13 +599,37 @@ class FabricReader:
             CAST(r.[{in_c}] AS VARCHAR(50)) AS [In_Time],
             CAST(r.[{out_c}] AS VARCHAR(50)) AS [Out_Time],
             CAST(r.[{rev_c}] AS DECIMAL(18, 2)) AS [Payment],
-            CAST(r.[{loc_c}] AS VARCHAR(100)) AS [Mall_Name]
+            {mall_select} AS [Mall_Name]
         FROM [{self.schema_name}].[{parking_table}] r
+        {mall_join}
         WHERE {date_filter}
           {loc_filter};
         """
         logger.info(f"Executing Fabric Ticket Details SQL:\n{sql}")
-        return self.execute_query(sql)
+        try:
+            df = self.execute_query(sql)
+        except Exception as e_detail:
+            logger.warning(f"Ticket details with JOIN failed: {e_detail}. Retrying without JOIN...")
+            sql_fallback = f"""
+            SELECT 
+                CAST(r.[{ticket_c}] AS VARCHAR(100)) AS [Ticket_Number],
+                CAST(r.[{date_c}] AS DATE) AS [Date],
+                CAST(r.[{in_c}] AS VARCHAR(50)) AS [In_Time],
+                CAST(r.[{out_c}] AS VARCHAR(50)) AS [Out_Time],
+                CAST(r.[{rev_c}] AS DECIMAL(18, 2)) AS [Payment],
+                CAST(r.[{loc_c}] AS VARCHAR(100)) AS [Mall_Name]
+            FROM [{self.schema_name}].[{parking_table}] r
+            WHERE {date_filter}
+              {loc_filter};
+            """
+            df = self.execute_query(sql_fallback)
+
+        from skidata_reader import CAR_PARK_TO_MALL
+        if "Mall_Name" in df.columns:
+            df["Mall_Name"] = df["Mall_Name"].apply(
+                lambda val: CAR_PARK_TO_MALL.get(str(val), CAR_PARK_TO_MALL.get(str(val).strip(), str(val)))
+            )
+        return df
 
     def _generate_mock_data(self, sql: str) -> pd.DataFrame:
         """Generates realistic mock Fabric responses for local testing/offline validation."""
