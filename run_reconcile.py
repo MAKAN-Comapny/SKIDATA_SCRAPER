@@ -54,6 +54,7 @@ def parse_args():
     parser.add_argument("--fresh-scrape", action="store_true", help="Trigger Playwright scraper before reconciling")
     parser.add_argument("--dry-run", action="store_true", help="Generate Excel & HTML report without sending email")
     parser.add_argument("--test-mode", action="store_true", help="Run with mock Fabric data for offline local testing")
+    parser.add_argument("--test-connection", action="store_true", help="Quickly verify Fabric connection and schema tables in < 3s")
     parser.add_argument("--recipients", type=str, default="", help="Comma-separated recipient emails (overrides .env)")
     parser.add_argument("--output-dir", type=str, default="reconciliation_reports", help="Output directory for reports")
     return parser.parse_args()
@@ -65,6 +66,23 @@ def main():
     print("=" * 70)
     print("🚀 MAKAN PARKING: 15-DAY SKIDATA vs. FABRIC RECONCILIATION ENGINE")
     print("=" * 70)
+
+    # 0. Pre-Flight Connection Check (Fails in 2s instead of waiting 18 mins!)
+    print("\n" + "=" * 70)
+    print("🔌 STEP 0: PRE-FLIGHT MICROSOFT FABRIC CONNECTION CHECK")
+    print("=" * 70)
+    fabric_reader = FabricReader(mock_mode=args.test_mode)
+    try:
+        tables = fabric_reader.get_schema_tables()
+        logger.info(f"✅ Fabric Connection Verified in < 2s! Discovered {len(tables)} objects in schema [{fabric_reader.schema_name}]: {tables}")
+    except Exception as e_preflight:
+        logger.error(f"❌ Pre-flight Fabric connection failed: {e_preflight}")
+        logger.error("Aborting immediately before running the 15-minute scraper to save time.")
+        sys.exit(1)
+
+    if args.test_connection:
+        print("\n✅ Fabric preflight healthcheck passed! Exiting (test-connection mode).")
+        sys.exit(0)
 
     # 1. Resolve Target Date Range
     if args.target_date:
@@ -104,8 +122,7 @@ def main():
     recipients = get_recipients()
     logger.info(f"Authorized Report Recipients: {', '.join(recipients)}")
 
-    # 4. Initialize Readers
-    fabric_reader = FabricReader(mock_mode=args.test_mode)
+    # 4. Initialize Readers (fabric_reader already initialized in Step 0)
     skidata_reader = SkiDataReader(exports_dir="Cleaned-Exports", fallback_dir="exports")
 
     # 5. Execute Reconciliation Engine

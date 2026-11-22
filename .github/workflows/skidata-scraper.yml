@@ -10,6 +10,7 @@ on:
         type: choice
         options:
           - reconcile
+          - test-connection
           - daily
           - historical
           - scrape-only
@@ -92,7 +93,12 @@ jobs:
           FABRIC_SCHEMA: "Skidata15"
           RECON_ALERT_RECIPIENTS: "sumit.dhankhar@makan.sa,karim.essam@makan.sa"
         run: |
-          if [ "${{ inputs.mode }}" = "historical" ]; then
+          if [ "${{ inputs.mode }}" = "test-connection" ]; then
+            echo "=========================================================="
+            echo "QUICK PRE-FLIGHT TEST: FABRIC CONNECTION & SCHEMA INSPECTION"
+            echo "=========================================================="
+            python run_reconcile.py --test-connection
+          elif [ "${{ inputs.mode }}" = "historical" ]; then
             echo "=========================================================="
             echo "RUNNING HISTORICAL / RANGE DATA SCRIPT"
             echo "Target SharePoint: Validated_Docs/old/"

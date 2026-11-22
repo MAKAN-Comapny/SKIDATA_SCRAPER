@@ -5,6 +5,8 @@ Guarantees:
   1. 100% Read-Only: Strictly blocks any non-SELECT / DDL / DML SQL statements.
   2. Multi-Driver Support: pyodbc (ODBC Driver 18/17) with token struct injection.
   3. OAuth2 Entra ID Token & Service Principal Authentication via MSAL and azure-identity.
+     Supports both Power BI Fabric scope (https://analysis.windows.net/powerbi/api/.default)
+     and Azure SQL scope (https://database.windows.net/.default).
   4. Dynamic Schema Introspection: Adapts to Skidata15 schema structure.
   5. Local Mock Mode: Allows safe verification when offline or in unit tests.
 """
@@ -29,6 +31,12 @@ DEFAULT_FABRIC_SERVER = (
 DEFAULT_FABRIC_DATABASE = "UnifiedWarehouse"
 DEFAULT_FABRIC_SCHEMA = "Skidata15"
 
+# Primary scope for Microsoft Fabric / Power BI SQL endpoints, followed by Azure SQL
+FABRIC_SCOPES = [
+    "https://analysis.windows.net/powerbi/api/.default",
+    "https://database.windows.net/.default",
+]
+
 # Strict regex to block any data modification statement
 MUTATING_SQL_PATTERN = re.compile(
     r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|MERGE|EXEC|EXECUTE|GRANT|REVOKE)\b",
@@ -38,7 +46,6 @@ MUTATING_SQL_PATTERN = re.compile(
 
 def _assert_read_only_sql(sql: str) -> None:
     """Enforces absolute read-only safety on any SQL passed to Fabric."""
-    # Strip comments and strings
     cleaned = re.sub(r"--.*$", "", sql, flags=re.MULTILINE)
     cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL)
     cleaned = re.sub(r"'.*?'", "", cleaned)
@@ -73,48 +80,59 @@ class FabricReader:
         self.mock_mode = mock_mode or os.getenv("FABRIC_MOCK_MODE", "false").lower() in ("true", "1", "yes")
         self._cached_tables: Optional[List[str]] = None
 
-    def _acquire_entra_token(self) -> Optional[bytes]:
-        """Acquires an Entra ID token formatted for SQL_COPT_SS_ACCESS_TOKEN (1256)."""
+    def _acquire_entra_tokens(self) -> List[tuple[str, bytes]]:
+        """
+        Acquires Entra ID tokens across Fabric and Azure SQL scopes.
+        Returns list of (scope_name, packed_token_struct).
+        """
         if not (self.client_id and self.client_secret and self.tenant_id):
-            return None
+            return []
 
-        # 1. Try MSAL
-        try:
-            import msal
-            app = msal.ConfidentialClientApplication(
-                client_id=self.client_id,
-                client_credential=self.client_secret,
-                authority=f"https://login.microsoftonline.com/{self.tenant_id}",
-            )
-            res = app.acquire_token_for_client(scopes=["https://database.windows.net/.default"])
-            if "access_token" in res:
-                raw_token = res["access_token"]
-                token_bytes = raw_token.encode("UTF-16-LE")
-                token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
-                logger.info("Successfully acquired Entra ID token via MSAL for Fabric SQL scope.")
-                return token_struct
-            else:
-                logger.warning(f"MSAL acquire_token returned: {res.get('error')}: {res.get('error_description')}")
-        except Exception as e_msal:
-            logger.warning(f"MSAL token attempt exception: {e_msal}")
+        tokens: List[tuple[str, bytes]] = []
 
-        # 2. Try azure-identity
-        try:
-            from azure.identity import ClientSecretCredential
-            cred = ClientSecretCredential(
-                tenant_id=self.tenant_id,
-                client_id=self.client_id,
-                client_secret=self.client_secret,
-            )
-            tok = cred.get_token("https://database.windows.net/.default")
-            token_bytes = tok.token.encode("UTF-16-LE")
-            token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
-            logger.info("Successfully acquired Entra ID token via azure-identity for Fabric SQL scope.")
-            return token_struct
-        except Exception as e_azure:
-            logger.warning(f"azure-identity token attempt exception: {e_azure}")
+        # 1. Try MSAL for each scope
+        for scope in FABRIC_SCOPES:
+            try:
+                import msal
+                app = msal.ConfidentialClientApplication(
+                    client_id=self.client_id,
+                    client_credential=self.client_secret,
+                    authority=f"https://login.microsoftonline.com/{self.tenant_id}",
+                )
+                res = app.acquire_token_for_client(scopes=[scope])
+                if "access_token" in res:
+                    raw_token = res["access_token"]
+                    token_bytes = raw_token.encode("UTF-16-LE")
+                    token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+                    logger.info(f"Acquired Entra ID token via MSAL for scope: {scope}")
+                    tokens.append((scope, token_struct))
+                else:
+                    logger.debug(f"MSAL scope {scope} returned: {res.get('error')}")
+            except Exception as e_msal:
+                logger.debug(f"MSAL scope {scope} exception: {e_msal}")
 
-        return None
+        # 2. Try azure-identity fallback
+        if not tokens:
+            try:
+                from azure.identity import ClientSecretCredential
+                cred = ClientSecretCredential(
+                    tenant_id=self.tenant_id,
+                    client_id=self.client_id,
+                    client_secret=self.client_secret,
+                )
+                for scope in FABRIC_SCOPES:
+                    try:
+                        tok = cred.get_token(scope)
+                        token_bytes = tok.token.encode("UTF-16-LE")
+                        token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+                        logger.info(f"Acquired Entra ID token via azure-identity for scope: {scope}")
+                        tokens.append((scope, token_struct))
+                    except Exception as e_tok:
+                        logger.debug(f"azure-identity scope {scope} failed: {e_tok}")
+            except Exception as e_azure:
+                logger.debug(f"azure-identity init failed: {e_azure}")
+
+        return tokens
 
     def _get_connection(self):
         """Creates an authenticated read-only connection to Fabric."""
@@ -135,60 +153,86 @@ class FabricReader:
                 driver = available_drivers[0]
 
         SQL_COPT_SS_ACCESS_TOKEN = 1256
-        server_host = self.server if self.server.startswith("tcp:") else f"tcp:{self.server}"
-        token_struct = self._acquire_entra_token()
+        clean_server = self.server.replace("tcp:", "").strip()
+        server_host = clean_server
 
-        # Method A: pyodbc with token struct (Recommended for Fabric)
-        if token_struct is not None:
+        token_list = self._acquire_entra_tokens()
+
+        # Method A: Try pyodbc with each acquired Entra ID token struct
+        last_token_error = None
+        for scope, token_struct in token_list:
+            for trust_cert in ("yes", "no"):
+                try:
+                    conn_str = (
+                        f"Driver={{{driver}}};"
+                        f"Server=tcp:{server_host},1433;"
+                        f"Database={self.database};"
+                        f"Encrypt=yes;"
+                        f"TrustServerCertificate={trust_cert};"
+                        f"Connection Timeout=30;"
+                    )
+                    logger.info(f"Connecting to Fabric using token ({scope}, TrustCert={trust_cert})...")
+                    return pyodbc.connect(conn_str, attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct}, timeout=30)
+                except Exception as e_tok_conn:
+                    last_token_error = e_tok_conn
+                    logger.warning(f"Token connection failed for scope {scope} (TrustCert={trust_cert}): {e_tok_conn}")
+
+        # Method B: pyodbc with ActiveDirectoryServicePrincipal connection string
+        e_sp = None
+        for uid_format in [self.client_id, f"{self.client_id}@{self.tenant_id}"]:
             try:
                 conn_str = (
                     f"Driver={{{driver}}};"
-                    f"Server={server_host},1433;"
+                    f"Server=tcp:{server_host},1433;"
                     f"Database={self.database};"
+                    f"Uid={uid_format};"
+                    f"Pwd={self.client_secret};"
+                    f"Authentication=ActiveDirectoryServicePrincipal;"
                     f"Encrypt=yes;"
                     f"TrustServerCertificate=yes;"
-                    f"Connection Timeout=45;"
+                    f"Connection Timeout=30;"
                 )
-                logger.info(f"Connecting to Fabric via token struct and driver [{driver}]...")
-                return pyodbc.connect(conn_str, attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct}, timeout=45)
-            except Exception as e_token:
-                logger.warning(f"Token-based connection attempt failed: {e_token}. Trying service principal string...")
-
-        # Method B: pyodbc with ActiveDirectoryServicePrincipal connection string
-        try:
-            conn_str = (
-                f"Driver={{{driver}}};"
-                f"Server={server_host},1433;"
-                f"Database={self.database};"
-                f"Uid={self.client_id};"
-                f"Pwd={self.client_secret};"
-                f"Authentication=ActiveDirectoryServicePrincipal;"
-                f"Encrypt=yes;"
-                f"TrustServerCertificate=yes;"
-                f"Connection Timeout=45;"
-            )
-            logger.info(f"Connecting to Fabric via ActiveDirectoryServicePrincipal and driver [{driver}]...")
-            return pyodbc.connect(conn_str, timeout=45)
-        except Exception as e_sp:
-            logger.error(f"pyodbc ActiveDirectoryServicePrincipal connection failed: {e_sp}")
+                logger.info(f"Connecting to Fabric via ActiveDirectoryServicePrincipal (UID={uid_format[:8]}...)...")
+                return pyodbc.connect(conn_str, timeout=30)
+            except Exception as e_sp_attempt:
+                e_sp = e_sp_attempt
+                logger.warning(f"pyodbc ActiveDirectoryServicePrincipal failed (UID={uid_format[:8]}...): {e_sp_attempt}")
 
         # Method C: pymssql fallback (if available)
+        e_mssql = None
         try:
             import pymssql
             logger.info("Attempting fallback connection with pymssql...")
             return pymssql.connect(
-                server=self.server,
+                server=server_host,
                 user=self.client_id,
                 password=self.client_secret,
                 database=self.database,
                 port=1433,
                 read_only=True,
-                timeout=45,
+                timeout=30,
             )
-        except Exception as e_mssql:
-            raise ConnectionError(
-                f"Failed to connect to Microsoft Fabric UnifiedWarehouse: {e_sp} | pymssql: {e_mssql}"
-            )
+        except Exception as e_mssql_attempt:
+            e_mssql = e_mssql_attempt
+            logger.warning(f"pymssql fallback attempt failed: {e_mssql_attempt}")
+
+        error_details = (
+            f"Token Error: {last_token_error} | "
+            f"Service Principal Error: {e_sp} | "
+            f"pymssql Error: {e_mssql}"
+        )
+        raise ConnectionError(
+            f"Failed to connect to Microsoft Fabric UnifiedWarehouse: {error_details}"
+        )
+
+    def test_connection(self) -> bool:
+        """Quick healthcheck to verify Fabric connectivity in < 3 seconds."""
+        try:
+            df = self.execute_query("SELECT 1 AS [status];")
+            return not df.empty and df.iloc[0]["status"] == 1
+        except Exception as e:
+            logger.error(f"Fabric test_connection failed: {e}")
+            raise
 
     def execute_query(self, sql: str, params: Optional[tuple] = None) -> pd.DataFrame:
         """Executes a strictly read-only SQL query and returns a pandas DataFrame."""
@@ -455,7 +499,6 @@ class FabricReader:
             "03 - Arab Mall Jeddah",
         ]
         
-        # If it's a summary query
         if "GROUP BY" in sql.upper():
             rows = []
             for d_offset in range(15):
@@ -469,7 +512,6 @@ class FabricReader:
                         rows.append([curr_date, mall, 1200 + d_offset * 10, (1200 + d_offset * 10) * 10.0])
             return pd.DataFrame(rows, columns=["Date", "Mall_Name", "Fabric_Tickets", "Fabric_Revenue"])
         
-        # Ticket level mock
         rows = []
         for i in range(1, 100):
             ticket_id = f"331719841050293000{i:05d}"
