@@ -81,6 +81,7 @@ def main():
         sys.exit(1)
 
     if args.test_connection:
+        fabric_reader.test_connection()
         print("\n✅ Fabric preflight healthcheck passed! Exiting (test-connection mode).")
         sys.exit(0)
 

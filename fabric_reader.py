@@ -69,6 +69,8 @@ class FabricReader:
         tenant_id: Optional[str] = None,
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
         mock_mode: bool = False,
     ):
         self.server = server or os.getenv("FABRIC_SERVER", DEFAULT_FABRIC_SERVER)
@@ -77,6 +79,8 @@ class FabricReader:
         self.tenant_id = tenant_id or os.getenv("TENANT_ID")
         self.client_id = client_id or os.getenv("CLIENT_ID")
         self.client_secret = client_secret or os.getenv("CLIENT_SECRET")
+        self.username = username or os.getenv("FABRIC_USER") or os.getenv("FABRIC_USERNAME")
+        self.password = password or os.getenv("FABRIC_PASSWORD")
         self.mock_mode = mock_mode or os.getenv("FABRIC_MOCK_MODE", "false").lower() in ("true", "1", "yes")
         self._cached_tables: Optional[List[str]] = None
 
@@ -156,6 +160,39 @@ class FabricReader:
         clean_server = self.server.replace("tcp:", "").strip()
         server_host = clean_server
 
+        # Method 0: Direct User Login & Password (Power BI / Excel method)
+        if self.username and self.password:
+            logger.info(f"Connecting to Fabric using user credentials (UID={self.username})...")
+            for auth_mode in ["ActiveDirectoryPassword", "SqlPassword"]:
+                for trust_cert in ["yes", "no"]:
+                    try:
+                        if auth_mode == "ActiveDirectoryPassword":
+                            conn_str = (
+                                f"Driver={{{driver}}};"
+                                f"Server=tcp:{server_host},1433;"
+                                f"Database={self.database};"
+                                f"Uid={self.username};"
+                                f"Pwd={self.password};"
+                                f"Authentication=ActiveDirectoryPassword;"
+                                f"Encrypt=yes;"
+                                f"TrustServerCertificate={trust_cert};"
+                                f"Connection Timeout=30;"
+                            )
+                        else:
+                            conn_str = (
+                                f"Driver={{{driver}}};"
+                                f"Server=tcp:{server_host},1433;"
+                                f"Database={self.database};"
+                                f"Uid={self.username};"
+                                f"Pwd={self.password};"
+                                f"Encrypt=yes;"
+                                f"TrustServerCertificate={trust_cert};"
+                                f"Connection Timeout=30;"
+                            )
+                        return pyodbc.connect(conn_str, timeout=30)
+                    except Exception as e_user_auth:
+                        logger.warning(f"User login attempt ({auth_mode}, TrustCert={trust_cert}) failed: {e_user_auth}")
+
         token_list = self._acquire_entra_tokens()
 
         # Method A: Try pyodbc with each acquired Entra ID token struct
@@ -226,10 +263,27 @@ class FabricReader:
         )
 
     def test_connection(self) -> bool:
-        """Quick healthcheck to verify Fabric connectivity in < 3 seconds."""
+        """Quick healthcheck to verify Fabric connectivity and introspect schema in < 5 seconds."""
         try:
-            df = self.execute_query("SELECT 1 AS [status];")
-            return not df.empty and df.iloc[0]["status"] == 1
+            tables = self.get_schema_tables()
+            logger.info(f"Verified connection to Fabric! Total objects in [{self.schema_name}]: {len(tables)}")
+            # Sample FactRid / Revenue table
+            for rev_t in ["FactRid", "fact_rid", "FactRevenue", "fact_revenue"]:
+                if rev_t in tables:
+                    cols = self._get_table_columns(rev_t)
+                    logger.info(f"Target Revenue Table [{self.schema_name}].[{rev_t}] Columns: {cols}")
+                    sample = self.execute_query(f"SELECT TOP 2 * FROM [{self.schema_name}].[{rev_t}];")
+                    logger.info(f"Sample from [{rev_t}]:\n{sample.to_string()}")
+                    break
+            # Sample FactParking
+            for park_t in ["FactParking", "fact_parking"]:
+                if park_t in tables:
+                    cols = self._get_table_columns(park_t)
+                    logger.info(f"Target Parking Table [{self.schema_name}].[{park_t}] Columns: {cols}")
+                    sample = self.execute_query(f"SELECT TOP 2 * FROM [{self.schema_name}].[{park_t}];")
+                    logger.info(f"Sample from [{park_t}]:\n{sample.to_string()}")
+                    break
+            return True
         except Exception as e:
             logger.error(f"Fabric test_connection failed: {e}")
             raise
@@ -316,12 +370,12 @@ class FabricReader:
         table_map = {t.lower(): t for t in tables}
         
         revenue_table = None
-        for cand in ["factrevenue", "fact_revenue", "revenue", "revenueindepth", "vw_factrevenue", "v_factrevenue"]:
+        for cand in ["factrid", "fact_rid", "factrevenue", "fact_revenue", "dimticketrevenue", "revenue", "revenueindepth", "vw_factrevenue", "v_factrevenue"]:
             if cand in table_map:
                 revenue_table = table_map[cand]
                 break
         if not revenue_table:
-            revenue_table = "FactRevenue"
+            revenue_table = "FactRid" if "FactRid" in tables else "FactRevenue"
 
         cols = self._get_table_columns(revenue_table)
 
@@ -353,14 +407,26 @@ class FabricReader:
                 rev_col = f"r.[{c}]"
                 break
 
-        # Check if DimMalls or DimMall exists in schema
+        # Check if DimLocation or DimMalls exists in schema
         mall_join = ""
         mall_select = f"CAST({loc_col} AS VARCHAR(100))"
-        for cand in ["dimmalls", "dimmall", "dim_mall", "malls"]:
+        for cand in ["dimlocation", "dim_location", "dimmalls", "dimmall", "dim_mall", "malls"]:
             if cand in table_map:
                 dim_table = table_map[cand]
-                mall_join = f"LEFT JOIN [{self.schema_name}].[{dim_table}] m WITH (NOLOCK) ON {loc_col} = m.Mall_ID"
-                mall_select = f"COALESCE(m.Mall_Name, CAST({loc_col} AS VARCHAR(100)))"
+                # Check columns of dim_table
+                dim_cols = self._get_table_columns(dim_table)
+                id_col = "Mall_ID"
+                for cid in ["mall_id", "location_id", "locationid", "id", "carpark_id"]:
+                    if cid in dim_cols:
+                        id_col = cid
+                        break
+                name_col = "Mall_Name"
+                for cnm in ["mall_name", "location_name", "locationname", "name", "carpark_name", "facility"]:
+                    if cnm in dim_cols:
+                        name_col = cnm
+                        break
+                mall_join = f"LEFT JOIN [{self.schema_name}].[{dim_table}] m WITH (NOLOCK) ON {loc_col} = m.[{id_col}]"
+                mall_select = f"COALESCE(m.[{name_col}], CAST({loc_col} AS VARCHAR(100)))"
                 break
 
         sql = f"""
