@@ -3,15 +3,17 @@ fabric_reader.py - Read-Only Query Client for Microsoft Fabric UnifiedWarehouse.
 
 Guarantees:
   1. 100% Read-Only: Strictly blocks any non-SELECT / DDL / DML SQL statements.
-  2. Multi-Driver Support: pyodbc (ODBC Driver 18/17) with pymssql fallback.
-  3. Token-Based & Service Principal Authentication via Azure AD (Entra ID).
-  4. Local Mock Mode: Allows safe verification when offline or in unit tests.
+  2. Multi-Driver Support: pyodbc (ODBC Driver 18/17) with token struct injection.
+  3. OAuth2 Entra ID Token & Service Principal Authentication via MSAL and azure-identity.
+  4. Dynamic Schema Introspection: Adapts to Skidata15 schema structure.
+  5. Local Mock Mode: Allows safe verification when offline or in unit tests.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import struct
 import logging
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Any
@@ -25,6 +27,7 @@ DEFAULT_FABRIC_SERVER = (
     "cqhuoihibq6ute5vdjuwvjf4ia-hw3wjoqz72sebexa6jbbt3edba.datawarehouse.fabric.microsoft.com"
 )
 DEFAULT_FABRIC_DATABASE = "UnifiedWarehouse"
+DEFAULT_FABRIC_SCHEMA = "Skidata15"
 
 # Strict regex to block any data modification statement
 MUTATING_SQL_PATTERN = re.compile(
@@ -55,6 +58,7 @@ class FabricReader:
         self,
         server: Optional[str] = None,
         database: Optional[str] = None,
+        schema_name: Optional[str] = None,
         tenant_id: Optional[str] = None,
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
@@ -62,66 +66,129 @@ class FabricReader:
     ):
         self.server = server or os.getenv("FABRIC_SERVER", DEFAULT_FABRIC_SERVER)
         self.database = database or os.getenv("FABRIC_DATABASE", DEFAULT_FABRIC_DATABASE)
+        self.schema_name = schema_name or os.getenv("FABRIC_SCHEMA", DEFAULT_FABRIC_SCHEMA)
         self.tenant_id = tenant_id or os.getenv("TENANT_ID")
         self.client_id = client_id or os.getenv("CLIENT_ID")
         self.client_secret = client_secret or os.getenv("CLIENT_SECRET")
         self.mock_mode = mock_mode or os.getenv("FABRIC_MOCK_MODE", "false").lower() in ("true", "1", "yes")
+        self._cached_tables: Optional[List[str]] = None
+
+    def _acquire_entra_token(self) -> Optional[bytes]:
+        """Acquires an Entra ID token formatted for SQL_COPT_SS_ACCESS_TOKEN (1256)."""
+        if not (self.client_id and self.client_secret and self.tenant_id):
+            return None
+
+        # 1. Try MSAL
+        try:
+            import msal
+            app = msal.ConfidentialClientApplication(
+                client_id=self.client_id,
+                client_credential=self.client_secret,
+                authority=f"https://login.microsoftonline.com/{self.tenant_id}",
+            )
+            res = app.acquire_token_for_client(scopes=["https://database.windows.net/.default"])
+            if "access_token" in res:
+                raw_token = res["access_token"]
+                token_bytes = raw_token.encode("UTF-16-LE")
+                token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+                logger.info("Successfully acquired Entra ID token via MSAL for Fabric SQL scope.")
+                return token_struct
+            else:
+                logger.warning(f"MSAL acquire_token returned: {res.get('error')}: {res.get('error_description')}")
+        except Exception as e_msal:
+            logger.warning(f"MSAL token attempt exception: {e_msal}")
+
+        # 2. Try azure-identity
+        try:
+            from azure.identity import ClientSecretCredential
+            cred = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+            )
+            tok = cred.get_token("https://database.windows.net/.default")
+            token_bytes = tok.token.encode("UTF-16-LE")
+            token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+            logger.info("Successfully acquired Entra ID token via azure-identity for Fabric SQL scope.")
+            return token_struct
+        except Exception as e_azure:
+            logger.warning(f"azure-identity token attempt exception: {e_azure}")
+
+        return None
 
     def _get_connection(self):
         """Creates an authenticated read-only connection to Fabric."""
         if self.mock_mode:
             return None
 
-        # Try pyodbc first with ODBC Driver 18/17
-        try:
-            import pyodbc
-            drivers = [d for d in pyodbc.drivers() if "ODBC Driver" in d and "SQL Server" in d]
-            driver = drivers[0] if drivers else "SQL Server"
-            
-            # 1. Service Principal Auth
-            if self.client_id and self.client_secret and self.tenant_id:
+        import pyodbc
+
+        available_drivers = pyodbc.drivers()
+        logger.info(f"Available ODBC drivers on system: {available_drivers}")
+        driver = "ODBC Driver 18 for SQL Server"
+        for candidate in ("ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"):
+            if candidate in available_drivers:
+                driver = candidate
+                break
+        else:
+            if available_drivers:
+                driver = available_drivers[0]
+
+        SQL_COPT_SS_ACCESS_TOKEN = 1256
+        server_host = self.server if self.server.startswith("tcp:") else f"tcp:{self.server}"
+        token_struct = self._acquire_entra_token()
+
+        # Method A: pyodbc with token struct (Recommended for Fabric)
+        if token_struct is not None:
+            try:
                 conn_str = (
                     f"Driver={{{driver}}};"
-                    f"Server={self.server},1433;"
+                    f"Server={server_host},1433;"
                     f"Database={self.database};"
-                    f"Uid={self.client_id}@{self.tenant_id};"
-                    f"Pwd={self.client_secret};"
-                    f"Authentication=ActiveDirectoryServicePrincipal;"
                     f"Encrypt=yes;"
-                    f"TrustServerCertificate=no;"
-                    f"ReadOnly=yes;"
+                    f"TrustServerCertificate=yes;"
+                    f"Connection Timeout=45;"
                 )
-                return pyodbc.connect(conn_str, timeout=30)
-            
-            # 2. Interactive / Azure CLI token
+                logger.info(f"Connecting to Fabric via token struct and driver [{driver}]...")
+                return pyodbc.connect(conn_str, attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct}, timeout=45)
+            except Exception as e_token:
+                logger.warning(f"Token-based connection attempt failed: {e_token}. Trying service principal string...")
+
+        # Method B: pyodbc with ActiveDirectoryServicePrincipal connection string
+        try:
             conn_str = (
                 f"Driver={{{driver}}};"
-                f"Server={self.server},1433;"
+                f"Server={server_host},1433;"
                 f"Database={self.database};"
-                f"Authentication=ActiveDirectoryInteractive;"
+                f"Uid={self.client_id};"
+                f"Pwd={self.client_secret};"
+                f"Authentication=ActiveDirectoryServicePrincipal;"
                 f"Encrypt=yes;"
-                f"ReadOnly=yes;"
+                f"TrustServerCertificate=yes;"
+                f"Connection Timeout=45;"
             )
-            return pyodbc.connect(conn_str, timeout=30)
-        except Exception as e:
-            logger.warning(f"pyodbc connection attempt failed: {e}. Trying pymssql...")
-            
-            # Try pymssql
-            try:
-                import pymssql
-                return pymssql.connect(
-                    server=self.server,
-                    user=self.client_id,
-                    password=self.client_secret,
-                    database=self.database,
-                    port=1433,
-                    read_only=True,
-                    timeout=30,
-                )
-            except Exception as e_mssql:
-                raise ConnectionError(
-                    f"Failed to connect to Microsoft Fabric UnifiedWarehouse via pyodbc or pymssql: {e_mssql}"
-                )
+            logger.info(f"Connecting to Fabric via ActiveDirectoryServicePrincipal and driver [{driver}]...")
+            return pyodbc.connect(conn_str, timeout=45)
+        except Exception as e_sp:
+            logger.error(f"pyodbc ActiveDirectoryServicePrincipal connection failed: {e_sp}")
+
+        # Method C: pymssql fallback (if available)
+        try:
+            import pymssql
+            logger.info("Attempting fallback connection with pymssql...")
+            return pymssql.connect(
+                server=self.server,
+                user=self.client_id,
+                password=self.client_secret,
+                database=self.database,
+                port=1433,
+                read_only=True,
+                timeout=45,
+            )
+        except Exception as e_mssql:
+            raise ConnectionError(
+                f"Failed to connect to Microsoft Fabric UnifiedWarehouse: {e_sp} | pymssql: {e_mssql}"
+            )
 
     def execute_query(self, sql: str, params: Optional[tuple] = None) -> pd.DataFrame:
         """Executes a strictly read-only SQL query and returns a pandas DataFrame."""
@@ -134,7 +201,6 @@ class FabricReader:
         conn = self._get_connection()
         try:
             with conn.cursor() as cursor:
-                # Set session to read uncommitted to prevent locking
                 try:
                     cursor.execute("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;")
                 except Exception:
@@ -147,52 +213,237 @@ class FabricReader:
                 
                 columns = [desc[0] for desc in cursor.description]
                 rows = cursor.fetchall()
-                # Convert tuples/pyodbc rows to list
                 data = [list(row) for row in rows]
                 return pd.DataFrame(data, columns=columns)
         finally:
             if hasattr(conn, "close"):
                 conn.close()
 
+    def get_schema_tables(self) -> List[str]:
+        """Discovers all tables and views in target schema (e.g. Skidata15)."""
+        if self._cached_tables is not None:
+            return self._cached_tables
+        if self.mock_mode:
+            self._cached_tables = ["FactRevenue", "FactParking", "DimMalls"]
+            return self._cached_tables
+        try:
+            sql = f"""
+            SELECT TABLE_NAME, TABLE_TYPE 
+            FROM INFORMATION_SCHEMA.TABLES 
+            WHERE TABLE_SCHEMA = '{self.schema_name}'
+            ORDER BY TABLE_NAME;
+            """
+            df = self.execute_query(sql)
+            if not df.empty:
+                self._cached_tables = df["TABLE_NAME"].tolist()
+                logger.info(f"Discovered {len(self._cached_tables)} objects in schema [{self.schema_name}]: {self._cached_tables}")
+                return self._cached_tables
+        except Exception as e:
+            logger.warning(f"Could not introspect tables in schema [{self.schema_name}]: {e}")
+        self._cached_tables = []
+        return self._cached_tables
+
+    def _get_table_columns(self, table_name: str) -> List[str]:
+        """Retrieves column names for a specific table in schema."""
+        if self.mock_mode:
+            return ["date", "transactiondate", "location_id", "mall_name", "ticket_id", "gross_revenue", "in_time", "out_time"]
+        try:
+            sql = f"""
+            SELECT COLUMN_NAME 
+            FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_SCHEMA = '{self.schema_name}' AND TABLE_NAME = '{table_name}';
+            """
+            df = self.execute_query(sql)
+            if not df.empty:
+                return [c.lower() for c in df["COLUMN_NAME"].tolist()]
+        except Exception as e:
+            logger.warning(f"Could not inspect columns for [{self.schema_name}].[{table_name}]: {e}")
+        return []
+
     def get_daily_revenue_summary(self, start_date: date, end_date: date) -> pd.DataFrame:
         """
-        Extracts daily gross revenue and ticket count from SkiData.FactRevenue.
-        Grouped by Date and Mall_Name (joined with DimMalls).
+        Extracts daily gross revenue and ticket count from [{schema_name}].[FactRevenue]
+        Grouped by Date and Mall_Name.
         """
+        if self.mock_mode:
+            return self._generate_mock_data("GROUP BY")
+
+        tables = self.get_schema_tables()
+        table_map = {t.lower(): t for t in tables}
+        
+        revenue_table = None
+        for cand in ["factrevenue", "fact_revenue", "revenue", "revenueindepth", "vw_factrevenue", "v_factrevenue"]:
+            if cand in table_map:
+                revenue_table = table_map[cand]
+                break
+        if not revenue_table:
+            revenue_table = "FactRevenue"
+
+        cols = self._get_table_columns(revenue_table)
+
+        # Resolve Date Column
+        date_col = "r.TransactionDate"
+        for c in ["transactiondate", "trandate", "date"]:
+            if c in cols:
+                date_col = f"r.[{c}]"
+                break
+
+        # Resolve Location / Mall Column
+        loc_col = "r.Location_ID"
+        for c in ["mall_name", "carpark", "car_park", "facility", "location_id", "locationid"]:
+            if c in cols:
+                loc_col = f"r.[{c}]"
+                break
+
+        # Resolve Ticket ID Column
+        ticket_col = "r.Ticket_ID"
+        for c in ["ticket_id", "ticket_number", "ticketid", "ticketnumber", "barcode"]:
+            if c in cols:
+                ticket_col = f"r.[{c}]"
+                break
+
+        # Resolve Revenue Column
+        rev_col = "r.Gross_Revenue"
+        for c in ["gross_revenue", "grossrevenue", "amount", "revenue", "gross_amount"]:
+            if c in cols:
+                rev_col = f"r.[{c}]"
+                break
+
+        # Check if DimMalls or DimMall exists in schema
+        mall_join = ""
+        mall_select = f"CAST({loc_col} AS VARCHAR(100))"
+        for cand in ["dimmalls", "dimmall", "dim_mall", "malls"]:
+            if cand in table_map:
+                dim_table = table_map[cand]
+                mall_join = f"LEFT JOIN [{self.schema_name}].[{dim_table}] m WITH (NOLOCK) ON {loc_col} = m.Mall_ID"
+                mall_select = f"COALESCE(m.Mall_Name, CAST({loc_col} AS VARCHAR(100)))"
+                break
+
         sql = f"""
         SELECT 
-            CAST(r.TransactionDate AS DATE) AS [Date],
-            COALESCE(m.Mall_Name, CAST(r.Location_ID AS VARCHAR(50))) AS [Mall_Name],
-            COUNT(r.Ticket_ID) AS [Fabric_Tickets],
-            SUM(CAST(r.Gross_Revenue AS DECIMAL(18, 2))) AS [Fabric_Revenue]
-        FROM SkiData.FactRevenue r WITH (NOLOCK)
-        LEFT JOIN DimMalls m WITH (NOLOCK) ON r.Location_ID = m.Mall_ID
-        WHERE CAST(r.TransactionDate AS DATE) >= '{start_date.isoformat()}'
-          AND CAST(r.TransactionDate AS DATE) <= '{end_date.isoformat()}'
-        GROUP BY CAST(r.TransactionDate AS DATE), COALESCE(m.Mall_Name, CAST(r.Location_ID AS VARCHAR(50)))
+            CAST({date_col} AS DATE) AS [Date],
+            {mall_select} AS [Mall_Name],
+            COUNT({ticket_col}) AS [Fabric_Tickets],
+            SUM(CAST({rev_col} AS DECIMAL(18, 2))) AS [Fabric_Revenue]
+        FROM [{self.schema_name}].[{revenue_table}] r WITH (NOLOCK)
+        {mall_join}
+        WHERE CAST({date_col} AS DATE) >= '{start_date.isoformat()}'
+          AND CAST({date_col} AS DATE) <= '{end_date.isoformat()}'
+        GROUP BY CAST({date_col} AS DATE), {mall_select}
         ORDER BY [Date] DESC, [Mall_Name] ASC;
         """
-        return self.execute_query(sql)
+        try:
+            df = self.execute_query(sql)
+        except Exception as e:
+            logger.warning(f"Primary summary query failed: {e}. Retrying without table hints...")
+            sql_fallback = f"""
+            SELECT 
+                CAST({date_col} AS DATE) AS [Date],
+                CAST({loc_col} AS VARCHAR(100)) AS [Mall_Name],
+                COUNT({ticket_col}) AS [Fabric_Tickets],
+                SUM(CAST({rev_col} AS DECIMAL(18, 2))) AS [Fabric_Revenue]
+            FROM [{self.schema_name}].[{revenue_table}] r
+            WHERE CAST({date_col} AS DATE) >= '{start_date.isoformat()}'
+              AND CAST({date_col} AS DATE) <= '{end_date.isoformat()}'
+            GROUP BY CAST({date_col} AS DATE), CAST({loc_col} AS VARCHAR(100))
+            ORDER BY [Date] DESC, [Mall_Name] ASC;
+            """
+            df = self.execute_query(sql_fallback)
+
+        from skidata_reader import CAR_PARK_TO_MALL
+        if "Mall_Name" in df.columns:
+            df["Mall_Name"] = df["Mall_Name"].apply(
+                lambda val: CAR_PARK_TO_MALL.get(str(val), CAR_PARK_TO_MALL.get(str(val).strip(), str(val)))
+            )
+        return df
 
     def get_ticket_details(self, target_date: date, location_id: Optional[str] = None) -> pd.DataFrame:
         """
-        Extracts ticket-level details from SkiData.FactParking for a specific date
+        Extracts ticket-level details from [{schema_name}].[FactParking] for a specific date
         to isolate exact missing/mismatched ticket sequences.
         """
-        loc_filter = f"AND r.Location_ID = '{location_id}'" if location_id else ""
+        if self.mock_mode:
+            return self._generate_mock_data("TICKETS")
+
+        tables = self.get_schema_tables()
+        table_map = {t.lower(): t for t in tables}
+        
+        parking_table = None
+        for cand in ["factparking", "fact_parking", "parking", "parkingtransactions", "vw_factparking", "v_factparking"]:
+            if cand in table_map:
+                parking_table = table_map[cand]
+                break
+        if not parking_table:
+            parking_table = "FactParking"
+
+        cols = self._get_table_columns(parking_table)
+
+        ticket_col = "r.Ticket_ID"
+        for c in ["ticket_id", "ticket_number", "ticketid", "ticketnumber", "barcode"]:
+            if c in cols:
+                ticket_col = f"r.[{c}]"
+                break
+
+        date_col = "r.TransactionDate"
+        for c in ["transactiondate", "trandate", "date"]:
+            if c in cols:
+                date_col = f"r.[{c}]"
+                break
+
+        in_col = "r.In_Time"
+        for c in ["in_time", "entrytime", "entry_time", "intime"]:
+            if c in cols:
+                in_col = f"r.[{c}]"
+                break
+
+        out_col = "r.Out_Time"
+        for c in ["out_time", "exittime", "exit_time", "outtime"]:
+            if c in cols:
+                out_col = f"r.[{c}]"
+                break
+
+        rev_col = "r.Gross_Revenue"
+        for c in ["gross_revenue", "grossrevenue", "payment", "amount", "revenue"]:
+            if c in cols:
+                rev_col = f"r.[{c}]"
+                break
+
+        loc_col = "r.Location_ID"
+        for c in ["location_id", "mall_name", "carpark", "facility"]:
+            if c in cols:
+                loc_col = f"r.[{c}]"
+                break
+
+        loc_filter = f"AND {loc_col} = '{location_id}'" if location_id else ""
+
         sql = f"""
         SELECT 
-            r.Ticket_ID AS [Ticket_Number],
-            CAST(r.TransactionDate AS DATE) AS [Date],
-            r.In_Time,
-            r.Out_Time,
-            r.Gross_Revenue AS [Payment],
-            r.Location_ID AS [Mall_Name]
-        FROM SkiData.FactParking r WITH (NOLOCK)
-        WHERE CAST(r.TransactionDate AS DATE) = '{target_date.isoformat()}'
+            {ticket_col} AS [Ticket_Number],
+            CAST({date_col} AS DATE) AS [Date],
+            {in_col} AS [In_Time],
+            {out_col} AS [Out_Time],
+            {rev_col} AS [Payment],
+            {loc_col} AS [Mall_Name]
+        FROM [{self.schema_name}].[{parking_table}] r WITH (NOLOCK)
+        WHERE CAST({date_col} AS DATE) = '{target_date.isoformat()}'
           {loc_filter};
         """
-        return self.execute_query(sql)
+        try:
+            return self.execute_query(sql)
+        except Exception:
+            sql_fallback = f"""
+            SELECT 
+                {ticket_col} AS [Ticket_Number],
+                CAST({date_col} AS DATE) AS [Date],
+                {in_col} AS [In_Time],
+                {out_col} AS [Out_Time],
+                {rev_col} AS [Payment],
+                {loc_col} AS [Mall_Name]
+            FROM [{self.schema_name}].[{parking_table}] r
+            WHERE CAST({date_col} AS DATE) = '{target_date.isoformat()}'
+              {loc_filter};
+            """
+            return self.execute_query(sql_fallback)
 
     def _generate_mock_data(self, sql: str) -> pd.DataFrame:
         """Generates realistic mock Fabric responses for local testing/offline validation."""
@@ -210,12 +461,9 @@ class FabricReader:
             for d_offset in range(15):
                 curr_date = today - timedelta(days=d_offset)
                 for mall in mock_malls:
-                    # Introduce a realistic intentional mismatch on 2 dates for testing
                     if d_offset == 1 and "Arab Mall" in mall:
-                        # Missing 20 tickets in Fabric
                         rows.append([curr_date, mall, 1430, 14300.0])
                     elif d_offset == 3 and "The View Mall" in mall:
-                        # Extra tickets in Fabric
                         rows.append([curr_date, mall, 910, 9100.0])
                     else:
                         rows.append([curr_date, mall, 1200 + d_offset * 10, (1200 + d_offset * 10) * 10.0])
