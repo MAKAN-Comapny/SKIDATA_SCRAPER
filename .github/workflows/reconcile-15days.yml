@@ -1,0 +1,82 @@
+name: SkiData vs. Fabric 15-Day Reconciliation
+
+on:
+  schedule:
+    # Daily at 10:30 UTC = 01:30 PM Saudi Time (AST) / 04:00 PM IST
+    - cron: "30 10 * * *"
+  repository_dispatch:
+    # External cron (cron-job.org) trigger support
+    types: [reconcile-15days-trigger]
+  workflow_dispatch:
+    # Manual execution from GitHub Actions tab
+    inputs:
+      days:
+        description: "Number of rolling days to reconcile"
+        required: false
+        default: "15"
+      target_date:
+        description: "End date for evaluation (YYYY-MM-DD). Leave blank for yesterday."
+        required: false
+        default: ""
+      dry_run:
+        description: "Generate report artifacts without sending email"
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: skidata-reconciliation
+  cancel-in-progress: false
+
+jobs:
+  run-reconciliation:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyodbc pymssql msal
+
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+
+      - name: Run 15-Day Reconciliation Engine
+        env:
+          HEADLESS: "true"
+          DAYS_COUNT: ${{ inputs.days || 15 }}
+          TARGET_DATE: ${{ inputs.target_date || '' }}
+          SKIDATA_URL: ${{ secrets.SKIDATA_URL }}
+          SKIDATA_TENANT: ${{ secrets.SKIDATA_TENANT }}
+          SKIDATA_LOGIN: ${{ secrets.SKIDATA_LOGIN }}
+          SKIDATA_PASSWORD: ${{ secrets.SKIDATA_PASSWORD }}
+          TENANT_ID: ${{ secrets.TENANT_ID }}
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          RECON_ALERT_RECIPIENTS: "sumit.dhankhar@makan.sa,karim.essam@makan.sa"
+        run: |
+          ARGS="--days ${{ inputs.days || 15 }}"
+          if [ -n "${{ inputs.target_date }}" ]; then
+            ARGS="$ARGS --target-date ${{ inputs.target_date }}"
+          fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          python run_reconcile.py $ARGS
+
+      - name: Upload Reconciliation Reports to Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reconciliation-audit-reports
+          path: reconciliation_reports/
+          retention-days: 30
