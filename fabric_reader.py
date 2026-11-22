@@ -58,6 +58,27 @@ def _assert_read_only_sql(sql: str) -> None:
         )
 
 
+def _match_column(cols: List[str], candidates: List[str]) -> Optional[str]:
+    """
+    Matches candidate column names against introspected table columns.
+    Normalizes whitespace, underscores, hyphens, and case so e.g. 'Car Park'
+    matches 'carpark', 'car_park', or 'Car Park'.
+    """
+    if not cols:
+        return None
+    norm_map = {}
+    for c in cols:
+        norm = re.sub(r"[^a-z0-9]", "", str(c).lower())
+        if norm and norm not in norm_map:
+            norm_map[norm] = c
+
+    for cand in candidates:
+        norm_cand = re.sub(r"[^a-z0-9]", "", cand.lower())
+        if norm_cand in norm_map:
+            return norm_map[norm_cand]
+    return None
+
+
 class FabricReader:
     """Safe, read-only reader for Microsoft Fabric UnifiedWarehouse."""
 
@@ -342,25 +363,68 @@ class FabricReader:
         return self._cached_tables
 
     def _get_table_columns(self, table_name: str) -> List[str]:
-        """Retrieves column names for a specific table in schema."""
+        """Retrieves column names for a specific table in schema using multi-layer introspection."""
         if self.mock_mode:
-            return ["date", "transactiondate", "location_id", "mall_name", "ticket_id", "gross_revenue", "in_time", "out_time"]
+            return [
+                "date", "car park", "facility", "quantity", "theoretical revenue",
+                "gross revenue", "payment", "serial number", "entry date/time", "exit date/time"
+            ]
+
+        conn = self._get_connection()
+        if not conn:
+            return []
+
+        # Layer 1: Direct SELECT TOP 0 * (Instant, works in Fabric, returns exact column names via cursor.description)
         try:
-            sql = f"""
-            SELECT COLUMN_NAME 
-            FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_SCHEMA = '{self.schema_name}' AND TABLE_NAME = '{table_name}';
-            """
-            df = self.execute_query(sql)
-            if not df.empty:
-                return [c.lower() for c in df["COLUMN_NAME"].tolist()]
-        except Exception as e:
-            logger.warning(f"Could not inspect columns for [{self.schema_name}].[{table_name}]: {e}")
+            with conn.cursor() as cursor:
+                cursor.execute(f"SELECT TOP 0 * FROM [{self.schema_name}].[{table_name}];")
+                if cursor.description:
+                    cols = [desc[0] for desc in cursor.description]
+                    logger.info(f"Introspected {len(cols)} columns for [{self.schema_name}].[{table_name}] via TOP 0: {cols}")
+                    return cols
+        except Exception as e_top0:
+            logger.debug(f"TOP 0 column introspection failed for [{table_name}]: {e_top0}")
+
+        # Layer 2: sys.columns via OBJECT_ID
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(f"""
+                    SELECT c.name 
+                    FROM sys.columns c
+                    WHERE c.object_id = OBJECT_ID('[{self.schema_name}].[{table_name}]')
+                    ORDER BY c.column_id;
+                """)
+                rows = cursor.fetchall()
+                if rows:
+                    cols = [r[0] for r in rows]
+                    logger.info(f"Introspected {len(cols)} columns for [{self.schema_name}].[{table_name}] via sys.columns: {cols}")
+                    return cols
+        except Exception as e_sys:
+            logger.debug(f"sys.columns introspection failed for [{table_name}]: {e_sys}")
+
+        # Layer 3: INFORMATION_SCHEMA (case-insensitive)
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(f"""
+                    SELECT COLUMN_NAME 
+                    FROM INFORMATION_SCHEMA.COLUMNS 
+                    WHERE LOWER(TABLE_SCHEMA) = LOWER('{self.schema_name}')
+                      AND LOWER(TABLE_NAME) = LOWER('{table_name}')
+                    ORDER BY ORDINAL_POSITION;
+                """)
+                rows = cursor.fetchall()
+                if rows:
+                    cols = [r[0] for r in rows]
+                    logger.info(f"Introspected {len(cols)} columns for [{self.schema_name}].[{table_name}] via INFORMATION_SCHEMA: {cols}")
+                    return cols
+        except Exception as e_info:
+            logger.debug(f"INFORMATION_SCHEMA column introspection failed for [{table_name}]: {e_info}")
+
         return []
 
     def get_daily_revenue_summary(self, start_date: date, end_date: date) -> pd.DataFrame:
         """
-        Extracts daily gross revenue and ticket count from [{schema_name}].[FactRevenue]
+        Extracts daily gross revenue and ticket count from [{schema_name}].[FactRid] / FactRevenue
         Grouped by Date and Mall_Name.
         """
         if self.mock_mode:
@@ -370,7 +434,7 @@ class FabricReader:
         table_map = {t.lower(): t for t in tables}
         
         revenue_table = None
-        for cand in ["factrid", "fact_rid", "factrevenue", "fact_revenue", "dimticketrevenue", "revenue", "revenueindepth", "vw_factrevenue", "v_factrevenue"]:
+        for cand in ["factrid", "fact_rid", "dimticketrevenue", "dim_ticket_revenue", "factrevenue", "fact_revenue", "revenue", "revenueindepth"]:
             if cand in table_map:
                 revenue_table = table_map[cand]
                 break
@@ -379,85 +443,95 @@ class FabricReader:
 
         cols = self._get_table_columns(revenue_table)
 
-        # Resolve Date Column
-        date_col = "r.TransactionDate"
-        for c in ["transactiondate", "trandate", "date"]:
-            if c in cols:
-                date_col = f"r.[{c}]"
-                break
+        # 1. Resolve Date Column
+        date_c = _match_column(cols, [
+            "date", "transactiondate", "transaction_date", "trandate", 
+            "datekey", "entry_date_time", "entry_datetime", "created_at"
+        ])
+        if date_c:
+            if "datekey" in date_c.lower():
+                date_expr = f"CONVERT(DATE, CAST(r.[{date_c}] AS VARCHAR(8)), 112)"
+            else:
+                date_expr = f"CAST(r.[{date_c}] AS DATE)"
+        else:
+            date_expr = "CAST(r.[Date] AS DATE)"
 
-        # Resolve Location / Mall Column
-        loc_col = "r.Location_ID"
-        for c in ["mall_name", "carpark", "car_park", "facility", "location_id", "locationid"]:
-            if c in cols:
-                loc_col = f"r.[{c}]"
-                break
+        # 2. Resolve Mall / Location Column
+        loc_c = _match_column(cols, [
+            "car park", "carpark", "car_park", "facility", 
+            "mall_name", "location_id", "locationid", "location_name"
+        ])
+        loc_col_name = loc_c or "Car Park"
+        mall_select = f"CAST(r.[{loc_col_name}] AS VARCHAR(100))"
 
-        # Resolve Ticket ID Column
-        ticket_col = "r.Ticket_ID"
-        for c in ["ticket_id", "ticket_number", "ticketid", "ticketnumber", "barcode"]:
-            if c in cols:
-                ticket_col = f"r.[{c}]"
-                break
-
-        # Resolve Revenue Column
-        rev_col = "r.Gross_Revenue"
-        for c in ["gross_revenue", "grossrevenue", "amount", "revenue", "gross_amount"]:
-            if c in cols:
-                rev_col = f"r.[{c}]"
-                break
-
-        # Check if DimLocation or DimMalls exists in schema
+        # Check if DimLocation should be joined (if loc_c appears to be an ID code)
         mall_join = ""
-        mall_select = f"CAST({loc_col} AS VARCHAR(100))"
-        for cand in ["dimlocation", "dim_location", "dimmalls", "dimmall", "dim_mall", "malls"]:
-            if cand in table_map:
-                dim_table = table_map[cand]
-                # Check columns of dim_table
-                dim_cols = self._get_table_columns(dim_table)
-                id_col = "Mall_ID"
-                for cid in ["mall_id", "location_id", "locationid", "id", "carpark_id"]:
-                    if cid in dim_cols:
-                        id_col = cid
-                        break
-                name_col = "Mall_Name"
-                for cnm in ["mall_name", "location_name", "locationname", "name", "carpark_name", "facility"]:
-                    if cnm in dim_cols:
-                        name_col = cnm
-                        break
-                mall_join = f"LEFT JOIN [{self.schema_name}].[{dim_table}] m WITH (NOLOCK) ON {loc_col} = m.[{id_col}]"
-                mall_select = f"COALESCE(m.[{name_col}], CAST({loc_col} AS VARCHAR(100)))"
-                break
+        if loc_c and any(term in loc_c.lower() for term in ["id", "code"]):
+            for cand in ["dimlocation", "dim_location", "dimmalls", "dimmall", "dim_mall", "malls"]:
+                if cand in table_map:
+                    dim_table = table_map[cand]
+                    dim_cols = self._get_table_columns(dim_table)
+                    dim_id = _match_column(dim_cols, ["location_id", "locationid", "mall_id", "id", "carpark_id"]) or loc_c
+                    dim_nm = _match_column(dim_cols, ["mall_name", "location_name", "locationname", "carpark_name", "name", "facility"])
+                    if dim_nm:
+                        mall_join = f"LEFT JOIN [{self.schema_name}].[{dim_table}] m ON r.[{loc_c}] = m.[{dim_id}]"
+                        mall_select = f"COALESCE(CAST(m.[{dim_nm}] AS VARCHAR(100)), CAST(r.[{loc_c}] AS VARCHAR(100)))"
+                    break
 
+        # 3. Resolve Tickets / Quantity Column
+        qty_c = _match_column(cols, ["quantity", "qty", "tickets", "ticket_count"])
+        ticket_id_c = _match_column(cols, [
+            "serial number", "serial_number", "ticket_id", "ticket_number", 
+            "ticketid", "barcode", "access id", "access_id"
+        ])
+        if qty_c:
+            ticket_expr = f"SUM(CAST(r.[{qty_c}] AS BIGINT))"
+        elif ticket_id_c:
+            ticket_expr = f"COUNT(r.[{ticket_id_c}])"
+        else:
+            ticket_expr = "COUNT(*)"
+
+        # 4. Resolve Revenue Column
+        rev_c = _match_column(cols, [
+            "gross_revenue", "gross revenue", "grossrevenue",
+            "theoretical revenue", "theoretical_revenue",
+            "payment", "amount", "revenue", "gross_amount", "total_amount", "net_revenue"
+        ])
+        rev_col_name = rev_c or "Gross Revenue"
+        rev_expr = f"SUM(CAST(r.[{rev_col_name}] AS DECIMAL(18, 2)))"
+
+        # Strictly NO 'WITH (NOLOCK)' (illegal in Microsoft Fabric)
         sql = f"""
         SELECT 
-            CAST({date_col} AS DATE) AS [Date],
+            {date_expr} AS [Date],
             {mall_select} AS [Mall_Name],
-            COUNT({ticket_col}) AS [Fabric_Tickets],
-            SUM(CAST({rev_col} AS DECIMAL(18, 2))) AS [Fabric_Revenue]
-        FROM [{self.schema_name}].[{revenue_table}] r WITH (NOLOCK)
+            {ticket_expr} AS [Fabric_Tickets],
+            {rev_expr} AS [Fabric_Revenue]
+        FROM [{self.schema_name}].[{revenue_table}] r
         {mall_join}
-        WHERE CAST({date_col} AS DATE) >= '{start_date.isoformat()}'
-          AND CAST({date_col} AS DATE) <= '{end_date.isoformat()}'
-        GROUP BY CAST({date_col} AS DATE), {mall_select}
+        WHERE {date_expr} >= '{start_date.isoformat()}'
+          AND {date_expr} <= '{end_date.isoformat()}'
+        GROUP BY {date_expr}, {mall_select}
         ORDER BY [Date] DESC, [Mall_Name] ASC;
         """
+        logger.info(f"Executing Fabric Revenue Summary SQL:\n{sql}")
         try:
             df = self.execute_query(sql)
         except Exception as e:
-            logger.warning(f"Primary summary query failed: {e}. Retrying without table hints...")
+            logger.warning(f"Primary summary query failed: {e}. Retrying without JOIN...")
             sql_fallback = f"""
             SELECT 
-                CAST({date_col} AS DATE) AS [Date],
-                CAST({loc_col} AS VARCHAR(100)) AS [Mall_Name],
-                COUNT({ticket_col}) AS [Fabric_Tickets],
-                SUM(CAST({rev_col} AS DECIMAL(18, 2))) AS [Fabric_Revenue]
+                {date_expr} AS [Date],
+                CAST(r.[{loc_col_name}] AS VARCHAR(100)) AS [Mall_Name],
+                {ticket_expr} AS [Fabric_Tickets],
+                {rev_expr} AS [Fabric_Revenue]
             FROM [{self.schema_name}].[{revenue_table}] r
-            WHERE CAST({date_col} AS DATE) >= '{start_date.isoformat()}'
-              AND CAST({date_col} AS DATE) <= '{end_date.isoformat()}'
-            GROUP BY CAST({date_col} AS DATE), CAST({loc_col} AS VARCHAR(100))
+            WHERE {date_expr} >= '{start_date.isoformat()}'
+              AND {date_expr} <= '{end_date.isoformat()}'
+            GROUP BY {date_expr}, CAST(r.[{loc_col_name}] AS VARCHAR(100))
             ORDER BY [Date] DESC, [Mall_Name] ASC;
             """
+            logger.info(f"Executing Fallback Fabric Revenue Summary SQL:\n{sql_fallback}")
             df = self.execute_query(sql_fallback)
 
         from skidata_reader import CAR_PARK_TO_MALL
@@ -488,72 +562,35 @@ class FabricReader:
 
         cols = self._get_table_columns(parking_table)
 
-        ticket_col = "r.Ticket_ID"
-        for c in ["ticket_id", "ticket_number", "ticketid", "ticketnumber", "barcode"]:
-            if c in cols:
-                ticket_col = f"r.[{c}]"
-                break
+        ticket_c = _match_column(cols, ["serial number", "serial_number", "ticket_id", "ticket_number", "ticketid", "barcode", "access id", "access_id"]) or "Serial Number"
+        date_c = _match_column(cols, ["date", "entry date/time", "entry_date_time", "entry date", "transaction date/time", "transactiondate", "trandate", "datekey"]) or "Date"
+        in_c = _match_column(cols, ["entry date/time", "entry_date_time", "in_time", "entrytime", "entry_time", "intime"]) or ticket_c
+        out_c = _match_column(cols, ["exit date/time", "exit_date_time", "out_time", "exittime", "exit_time", "outtime"]) or ticket_c
+        rev_c = _match_column(cols, ["payment", "gross_revenue", "grossrevenue", "amount", "revenue", "discount amount"]) or "Payment"
+        loc_c = _match_column(cols, ["car park", "carpark", "car_park", "facility", "mall_name", "location_id"]) or "Car Park"
 
-        date_col = "r.TransactionDate"
-        for c in ["transactiondate", "trandate", "date"]:
-            if c in cols:
-                date_col = f"r.[{c}]"
-                break
+        if "datekey" in date_c.lower():
+            date_filter = f"CONVERT(DATE, CAST(r.[{date_c}] AS VARCHAR(8)), 112) = '{target_date.isoformat()}'"
+        else:
+            date_filter = f"CAST(r.[{date_c}] AS DATE) = '{target_date.isoformat()}'"
 
-        in_col = "r.In_Time"
-        for c in ["in_time", "entrytime", "entry_time", "intime"]:
-            if c in cols:
-                in_col = f"r.[{c}]"
-                break
+        loc_filter = f"AND CAST(r.[{loc_c}] AS VARCHAR(100)) = '{location_id}'" if location_id else ""
 
-        out_col = "r.Out_Time"
-        for c in ["out_time", "exittime", "exit_time", "outtime"]:
-            if c in cols:
-                out_col = f"r.[{c}]"
-                break
-
-        rev_col = "r.Gross_Revenue"
-        for c in ["gross_revenue", "grossrevenue", "payment", "amount", "revenue"]:
-            if c in cols:
-                rev_col = f"r.[{c}]"
-                break
-
-        loc_col = "r.Location_ID"
-        for c in ["location_id", "mall_name", "carpark", "facility"]:
-            if c in cols:
-                loc_col = f"r.[{c}]"
-                break
-
-        loc_filter = f"AND {loc_col} = '{location_id}'" if location_id else ""
-
+        # Strictly NO 'WITH (NOLOCK)' (illegal in Microsoft Fabric)
         sql = f"""
         SELECT 
-            {ticket_col} AS [Ticket_Number],
-            CAST({date_col} AS DATE) AS [Date],
-            {in_col} AS [In_Time],
-            {out_col} AS [Out_Time],
-            {rev_col} AS [Payment],
-            {loc_col} AS [Mall_Name]
-        FROM [{self.schema_name}].[{parking_table}] r WITH (NOLOCK)
-        WHERE CAST({date_col} AS DATE) = '{target_date.isoformat()}'
+            CAST(r.[{ticket_c}] AS VARCHAR(100)) AS [Ticket_Number],
+            CAST(r.[{date_c}] AS DATE) AS [Date],
+            CAST(r.[{in_c}] AS VARCHAR(50)) AS [In_Time],
+            CAST(r.[{out_c}] AS VARCHAR(50)) AS [Out_Time],
+            CAST(r.[{rev_c}] AS DECIMAL(18, 2)) AS [Payment],
+            CAST(r.[{loc_c}] AS VARCHAR(100)) AS [Mall_Name]
+        FROM [{self.schema_name}].[{parking_table}] r
+        WHERE {date_filter}
           {loc_filter};
         """
-        try:
-            return self.execute_query(sql)
-        except Exception:
-            sql_fallback = f"""
-            SELECT 
-                {ticket_col} AS [Ticket_Number],
-                CAST({date_col} AS DATE) AS [Date],
-                {in_col} AS [In_Time],
-                {out_col} AS [Out_Time],
-                {rev_col} AS [Payment],
-                {loc_col} AS [Mall_Name]
-            FROM [{self.schema_name}].[{parking_table}] r
-            WHERE CAST({date_col} AS DATE) = '{target_date.isoformat()}'
-              {loc_filter};
-            """
-            return self.execute_query(sql_fallback)
+        logger.info(f"Executing Fabric Ticket Details SQL:\n{sql}")
+        return self.execute_query(sql)
 
     def _generate_mock_data(self, sql: str) -> pd.DataFrame:
         """Generates realistic mock Fabric responses for local testing/offline validation."""

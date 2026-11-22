@@ -67,22 +67,31 @@ def main():
     print("🚀 MAKAN PARKING: 15-DAY SKIDATA vs. FABRIC RECONCILIATION ENGINE")
     print("=" * 70)
 
-    # 0. Pre-Flight Connection Check (Fails in 2s instead of waiting 18 mins!)
+    # 0. Pre-Flight Connection & Query Check (Fails in < 3s instead of waiting 18 mins!)
     print("\n" + "=" * 70)
-    print("🔌 STEP 0: PRE-FLIGHT MICROSOFT FABRIC CONNECTION CHECK")
+    print("🔌 STEP 0: PRE-FLIGHT MICROSOFT FABRIC CONNECTION & QUERY CHECK")
     print("=" * 70)
     fabric_reader = FabricReader(mock_mode=args.test_mode)
     try:
         tables = fabric_reader.get_schema_tables()
         logger.info(f"✅ Fabric Connection Verified in < 2s! Discovered {len(tables)} objects in schema [{fabric_reader.schema_name}]: {tables}")
+
+        # Introspect target tables and sample data
+        fabric_reader.test_connection()
+
+        # Pre-flight revenue query validation (checks syntax, columns, permissions)
+        test_check_date = datetime.now().date() - timedelta(days=2)
+        logger.info(f"Pre-flight testing revenue summary query for {test_check_date}...")
+        test_summary_df = fabric_reader.get_daily_revenue_summary(test_check_date, test_check_date)
+        logger.info(f"✅ Pre-flight revenue summary query SUCCESS! ({len(test_summary_df)} rows returned)")
+
     except Exception as e_preflight:
-        logger.error(f"❌ Pre-flight Fabric connection failed: {e_preflight}")
+        logger.error(f"❌ Pre-flight Fabric check failed: {e_preflight}")
         logger.error("Aborting immediately before running the 15-minute scraper to save time.")
         sys.exit(1)
 
     if args.test_connection:
-        fabric_reader.test_connection()
-        print("\n✅ Fabric preflight healthcheck passed! Exiting (test-connection mode).")
+        print("\n✅ Fabric preflight healthcheck and query test passed! Exiting (test-connection mode).")
         sys.exit(0)
 
     # 1. Resolve Target Date Range

@@ -14,10 +14,26 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 import pytest
 
-from fabric_reader import FabricReader, _assert_read_only_sql
+from fabric_reader import FabricReader, _assert_read_only_sql, _match_column
 from skidata_reader import SkiDataReader, CAR_PARK_TO_MALL
 from reconcile_engine import ReconcileEngine, ReconciliationResult
 from notifier import build_html_report, get_recipients
+
+
+def test_column_matcher_and_no_nolock():
+    """Verifies fuzzy matching for Fabric/SkiData columns and absence of WITH (NOLOCK)."""
+    cols = ["Date", "Car Park", "Facility", "Theoretical Revenue", "Quantity", "Serial Number"]
+    
+    assert _match_column(cols, ["date", "transactiondate"]) == "Date"
+    assert _match_column(cols, ["carpark", "car_park", "mall_name"]) == "Car Park"
+    assert _match_column(cols, ["quantity", "qty"]) == "Quantity"
+    assert _match_column(cols, ["theoretical_revenue", "gross_revenue"]) == "Theoretical Revenue"
+    assert _match_column(cols, ["ticket_id", "serial number", "serial_number"]) == "Serial Number"
+
+    # Verify Fabric queries in mock mode do not contain WITH (NOLOCK)
+    reader = FabricReader(mock_mode=True)
+    summary = reader.get_daily_revenue_summary(date(2026, 11, 20), date(2026, 11, 20))
+    assert not summary.empty
 
 
 def test_fabric_read_only_enforcement():
