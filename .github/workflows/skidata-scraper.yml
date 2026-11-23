@@ -7,9 +7,12 @@ on:
   #   - cron: "50 5 * * *"
   #   # Run 2: 09:00 UTC = 12:00 PM (Noon) Saudi Time (AST) / 02:30 PM IST (Midday Refresh)
   #   - cron: "0 9 * * *"
-  repository_dispatch:
-    # External cron (cron-job.org) trigger support
-    types: [manual-trigger]
+
+  # repository_dispatch:
+  #   # PAUSED: Disabled so Yogesh cron-job.org triggers cannot call legacy 1-day scraper.
+  #   # Scraping is now handled by the 15-day rolling scraper on feature/5-days-rolling.
+  #   types: [manual-trigger]
+
   workflow_dispatch:
     # Allow manual trigger from GitHub Actions tab
     inputs:
@@ -25,8 +28,18 @@ concurrency:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+    # PAUSED: Guardrail against unintentional manual triggers.
+    if: false
 
     steps:
+      - name: Pipeline Paused Guard
+        run: |
+          echo "=========================================================================="
+          echo "PIPELINE PAUSED: Legacy 1-Day Scraper on 'main' is deactivated."
+          echo "Scraping is now managed by the 15-day rolling pipeline on 'feature/5-days-rolling'."
+          echo "=========================================================================="
+          exit 0
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
