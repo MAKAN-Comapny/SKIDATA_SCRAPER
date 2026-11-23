@@ -59,7 +59,7 @@ jobs:
             EXTRA_ARGS="--dry-run"
           fi
           SRC="${{ github.event.client_payload.source_folder || github.event.client_payload.folder || inputs.source_folder || 'Validated_Docs' }}"
-          DEST="${{ github.event.client_payload.archive_root || github.event.client_payload.dest_root || inputs.archive_root || '' }}"
+          DEST="${{ github.event.client_payload.archive_root || github.event.client_payload.target_folder || github.event.client_payload.dest_root || inputs.archive_root || '' }}"
           if [ -z "$DEST" ]; then
             DEST="${SRC}/old"
           fi
