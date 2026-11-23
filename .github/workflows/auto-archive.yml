@@ -8,13 +8,13 @@ on:
     # Allows manual execution anytime with custom inputs
     inputs:
       source_folder:
-        description: "Source SharePoint folder containing active Excel exports"
+        description: "Source SharePoint folder (e.g. Validated_Docs, Ski Data 5, SKIDATA - Odoo)"
         required: false
         default: "Validated_Docs"
       archive_root:
-        description: "Target SharePoint archive directory"
+        description: "Target SharePoint archive directory (leave blank for <source_folder>/old)"
         required: false
-        default: "Validated_Docs/old"
+        default: ""
       dry_run:
         description: "Dry run mode (scan & classify only, do not move files)"
         required: false
@@ -55,10 +55,20 @@ jobs:
           SHAREPOINT_SITE_NAME: ${{ secrets.SHAREPOINT_SITE_NAME }}
         run: |
           EXTRA_ARGS=""
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
+          if [ "${{ inputs.dry_run }}" = "true" ] || [ "${{ github.event.client_payload.dry_run }}" = "true" ]; then
             EXTRA_ARGS="--dry-run"
           fi
+          SRC="${{ github.event.client_payload.source_folder || github.event.client_payload.folder || inputs.source_folder || 'Validated_Docs' }}"
+          DEST="${{ github.event.client_payload.archive_root || github.event.client_payload.dest_root || inputs.archive_root || '' }}"
+          if [ -z "$DEST" ]; then
+            DEST="${SRC}/old"
+          fi
+          echo "=========================================================="
+          echo "RUNNING SHAREPOINT ARCHIVER & FILE MOVER"
+          echo "Source:       $SRC"
+          echo "Archive Root: $DEST"
+          echo "=========================================================="
           python archive_files.py \
-            --source "${{ inputs.source_folder || 'Validated_Docs' }}" \
-            --dest-root "${{ inputs.archive_root || 'Validated_Docs/old' }}" \
+            --source "$SRC" \
+            --dest-root "$DEST" \
             $EXTRA_ARGS

@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       source_folder:
-        description: "Source SharePoint folder containing active Excel exports"
+        description: "Source SharePoint folder (e.g. Validated_Docs, Ski Data 5, SKIDATA - Odoo)"
         required: false
         default: "Validated_Docs"
       archive_root:
-        description: "Target SharePoint archive directory"
+        description: "Target SharePoint archive directory (leave blank for <source_folder>/old)"
         required: false
-        default: "Validated_Docs/old"
+        default: ""
   repository_dispatch:
     # Allows external triggers (e.g. cron-job.org) via GitHub API
     types: [auto-archive-trigger, manual-trigger]
@@ -48,9 +48,16 @@ jobs:
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
           SHAREPOINT_SITE_NAME: ${{ secrets.SHAREPOINT_SITE_NAME }}
         run: |
+          SRC="${{ github.event.client_payload.source_folder || github.event.client_payload.folder || inputs.source_folder || 'Validated_Docs' }}"
+          DEST="${{ github.event.client_payload.archive_root || github.event.client_payload.dest_root || inputs.archive_root || '' }}"
+          if [ -z "$DEST" ]; then
+            DEST="${SRC}/old"
+          fi
           echo "=========================================================="
           echo "RUNNING SHAREPOINT ARCHIVER & FILE MOVER"
+          echo "Source:       $SRC"
+          echo "Archive Root: $DEST"
           echo "=========================================================="
           python archive_files.py \
-            --source "${{ inputs.source_folder || 'Validated_Docs' }}" \
-            --dest-root "${{ inputs.archive_root || 'Validated_Docs/old' }}"
+            --source "$SRC" \
+            --dest-root "$DEST"

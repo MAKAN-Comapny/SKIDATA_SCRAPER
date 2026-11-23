@@ -617,8 +617,8 @@ def main():
     )
     parser.add_argument(
         "--dest-root",
-        default=os.getenv("ARCHIVE_ROOT", DEFAULT_ARCHIVE_ROOT),
-        help=f"Archive root folder (default: {DEFAULT_ARCHIVE_ROOT})",
+        default=os.getenv("ARCHIVE_ROOT", ""),
+        help=f"Archive root folder (default: <source>/old or {DEFAULT_ARCHIVE_ROOT})",
     )
     parser.add_argument(
         "--dry-run",
@@ -628,9 +628,14 @@ def main():
     )
     args = parser.parse_args()
 
+    source = args.source or DEFAULT_SOURCE_FOLDER
+    dest_root = args.dest_root
+    if not dest_root:
+        dest_root = f"{source.rstrip('/')}/old"
+
     archive_validated_docs(
-        source_folder=args.source,
-        archive_root=args.dest_root,
+        source_folder=source,
+        archive_root=dest_root,
         dry_run=args.dry_run,
     )
 
