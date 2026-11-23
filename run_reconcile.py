@@ -174,6 +174,28 @@ def main():
     else:
         logger.warning("Notification could not be dispatched (check credentials). HTML report preserved locally.")
 
+    # 8. Upload to SharePoint: reconcile-15days(Source & Fabric)
+    target_sp_folder = os.getenv("SHAREPOINT_RECON_FOLDER", "reconcile-15days(Source & Fabric)")
+    try:
+        from To_Sharepoint import get_access_token, get_site_id, ensure_folder_path, upload_file
+        logger.info(f"Uploading reconciliation reports to SharePoint folder [{target_sp_folder}]...")
+        token = get_access_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        site_id = get_site_id(headers)
+        ensure_folder_path(site_id, headers, folder=target_sp_folder)
+
+        # Upload Excel audit file
+        if result.excel_report_path and os.path.exists(result.excel_report_path):
+            upload_file(site_id, headers, result.excel_report_path, folder=target_sp_folder)
+            logger.info(f"✅ Excel audit report uploaded to SharePoint: {target_sp_folder}/{os.path.basename(result.excel_report_path)}")
+
+        # Upload HTML preview report
+        if html_preview_path and os.path.exists(html_preview_path):
+            upload_file(site_id, headers, html_preview_path, folder=target_sp_folder)
+            logger.info(f"✅ HTML preview report uploaded to SharePoint: {target_sp_folder}/{os.path.basename(html_preview_path)}")
+    except Exception as e_sp:
+        logger.warning(f"SharePoint upload skipped/failed: {e_sp}")
+
     print("\n✅ Reconciliation job finished successfully.\n")
 
 
