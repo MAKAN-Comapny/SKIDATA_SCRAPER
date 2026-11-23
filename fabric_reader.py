@@ -534,11 +534,9 @@ class FabricReader:
             logger.info(f"Executing Fallback Fabric Revenue Summary SQL:\n{sql_fallback}")
             df = self.execute_query(sql_fallback)
 
-        from skidata_reader import CAR_PARK_TO_MALL
+        from skidata_reader import normalize_mall_name
         if "Mall_Name" in df.columns:
-            df["Mall_Name"] = df["Mall_Name"].apply(
-                lambda val: CAR_PARK_TO_MALL.get(str(val), CAR_PARK_TO_MALL.get(str(val).strip(), str(val)))
-            )
+            df["Mall_Name"] = df["Mall_Name"].apply(normalize_mall_name)
         return df
 
     def get_ticket_details(self, target_date: date, location_id: Optional[str] = None) -> pd.DataFrame:
@@ -624,11 +622,9 @@ class FabricReader:
             """
             df = self.execute_query(sql_fallback)
 
-        from skidata_reader import CAR_PARK_TO_MALL
+        from skidata_reader import normalize_mall_name
         if "Mall_Name" in df.columns:
-            df["Mall_Name"] = df["Mall_Name"].apply(
-                lambda val: CAR_PARK_TO_MALL.get(str(val), CAR_PARK_TO_MALL.get(str(val).strip(), str(val)))
-            )
+            df["Mall_Name"] = df["Mall_Name"].apply(normalize_mall_name)
         return df
 
     def _generate_mock_data(self, sql: str) -> pd.DataFrame:

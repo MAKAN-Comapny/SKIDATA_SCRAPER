@@ -22,11 +22,32 @@ logger = logging.getLogger("skidata_reader")
 # Canonical mapping matching odoo_transformer.py and Fabric DimMalls
 CAR_PARK_TO_MALL = {
     "Westfield DAMMAM": "02 - Nakheel Mall Dammam",
+    "Westfield Dammam": "02 - Nakheel Mall Dammam",
     "View Mall": "01 - The View Mall Riyadh",
     "Alnoor Mall": "06 - Al Noor Mall Madinah",
     "Mall of Arabia": "03 - Arab Mall Jeddah",
-    "Premium Carpark": "06 - Al Noor Mall Madinah (Premium)",
+    "Mall Of Arabia": "03 - Arab Mall Jeddah",
+    "Premium Carpark": "06 - Al Noor Mall Madinah",
 }
+
+
+def normalize_mall_name(val: Any) -> str:
+    """Normalizes car park / facility names to canonical Fabric DimMalls names (case-insensitive)."""
+    if not val or pd.isna(val):
+        return "Unknown"
+    s = str(val).strip()
+    if s in CAR_PARK_TO_MALL:
+        return CAR_PARK_TO_MALL[s]
+    s_clean = re.sub(r"[^a-zA-Z0-9]", "", s).lower()
+    if "westfield" in s_clean or "nakheel" in s_clean:
+        return "02 - Nakheel Mall Dammam"
+    if "arabia" in s_clean or "arab" in s_clean:
+        return "03 - Arab Mall Jeddah"
+    if "view" in s_clean:
+        return "01 - The View Mall Riyadh"
+    if "noor" in s_clean or "premium" in s_clean or "alnoor" in s_clean:
+        return "06 - Al Noor Mall Madinah"
+    return s
 
 
 class SkiDataReader:
@@ -97,9 +118,7 @@ class SkiDataReader:
         )
 
         # Map to canonical Mall Names
-        summary["Mall_Name"] = summary["Car_Park"].map(
-            lambda cp: CAR_PARK_TO_MALL.get(str(cp).strip(), str(cp).strip())
-        )
+        summary["Mall_Name"] = summary["Car_Park"].apply(normalize_mall_name)
         
         # Aggregate again in case multiple car parks mapped to same Mall
         final_summary = (
@@ -128,9 +147,7 @@ class SkiDataReader:
             raw_df["_ReconDate"] = pd.to_datetime(raw_df[date_col], errors="coerce").dt.date
             
             car_park_col = "Car Park" if "Car Park" in raw_df.columns else "Facility"
-            raw_df["_MallName"] = raw_df[car_park_col].map(
-                lambda cp: CAR_PARK_TO_MALL.get(str(cp).strip(), str(cp).strip())
-            )
+            raw_df["_MallName"] = raw_df[car_park_col].apply(normalize_mall_name)
 
             res = pd.DataFrame()
             res["Ticket_Number"] = raw_df["Serial Number"].astype(str)
