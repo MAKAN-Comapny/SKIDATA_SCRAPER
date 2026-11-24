@@ -22,10 +22,15 @@ CLEANED_EXPORTS_DIR = "Cleaned-Exports"
 
 def get_access_token():
     """Get Microsoft Graph access token using app credentials."""
-    token_url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+    tenant = os.getenv("TENANT_ID") or TENANT_ID
+    client_id = os.getenv("CLIENT_ID") or CLIENT_ID
+    client_sec = os.getenv("CLIENT_SECRET") or CLIENT_SECRET
+    if not (tenant and client_id and client_sec):
+        raise ValueError("Missing TENANT_ID, CLIENT_ID, or CLIENT_SECRET for SharePoint Graph API.")
+    token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
     data = {
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
+        "client_id": client_id,
+        "client_secret": client_sec,
         "grant_type": "client_credentials",
         "scope": "https://graph.microsoft.com/.default",
     }
@@ -36,7 +41,9 @@ def get_access_token():
 
 def get_site_id(headers):
     """Find SharePoint site ID by URL or display name."""
-    site_input = SITE_NAME.strip()
+    site_input = (os.getenv("SHAREPOINT_SITE_NAME") or SITE_NAME or "").strip()
+    if not site_input:
+        raise ValueError("Missing SHAREPOINT_SITE_NAME.")
 
     # Full URL: https://tenant.sharepoint.com/sites/SiteName
     url_match = re.match(r"https?://([^/]+)(/.*)?", site_input)

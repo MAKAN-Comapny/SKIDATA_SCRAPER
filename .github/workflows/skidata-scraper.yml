@@ -30,6 +30,27 @@ on:
         description: "Target End Date (YYYY-MM-DD), leave blank for yesterday"
         required: false
         default: ""
+      source:
+        description: "SkiData Data Source: 'sharepoint' (Fast: 15s from 'Ski Data 5') or 'scrape' (18min portal scrape)"
+        required: false
+        default: "sharepoint"
+        type: choice
+        options:
+          - sharepoint
+          - scrape
+          - local
+      source_folder:
+        description: "SharePoint folder containing 15-day files (used when source=sharepoint)"
+        required: false
+        default: "Ski Data 5"
+      allow_stale:
+        description: "Bypass stale data guard (for testing older data if today's file is missing)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
       dry_run:
         description: "Dry run: Generate reconciliation report without sending email"
         required: false
@@ -120,7 +141,18 @@ jobs:
             echo "Target Recipients: sumit.dhankhar@makan.sa, karim.essam@makan.sa"
             echo "=========================================================="
             
-            ARGS="--fresh-scrape --days ${{ inputs.days_count || 15 }}"
+            SOURCE="${{ inputs.source || 'sharepoint' }}"
+            SOURCE_FOLDER="${{ inputs.source_folder || 'Ski Data 5' }}"
+            ALLOW_STALE="${{ inputs.allow_stale || 'false' }}"
+
+            if [ "${{ inputs.mode }}" = "daily" ]; then
+              SOURCE="scrape"
+            fi
+
+            ARGS="--source $SOURCE --source-folder \"$SOURCE_FOLDER\" --days ${{ inputs.days_count || 15 }}"
+            if [ "$ALLOW_STALE" = "true" ]; then
+              ARGS="$ARGS --allow-stale"
+            fi
             if [ -n "${{ inputs.target_date }}" ]; then
               ARGS="$ARGS --target-date ${{ inputs.target_date }}"
             fi

@@ -50,9 +50,26 @@ logger = logging.getLogger("run_reconcile")
 def parse_args():
     parser = argparse.ArgumentParser(description="SkiData vs. Microsoft Fabric 15-Day Reconciliation Pipeline")
     parser.add_argument("--days", type=int, default=15, help="Number of rolling days to reconcile (default: 15)")
-    parser.add_argument("--target-date", type=str, default="", help="Target end date (YYYY-MM-DD). Defaults to yesterday.")
-    parser.add_argument("--fresh-scrape", action="store_true", help="Trigger Playwright scraper before reconciling")
-    parser.add_argument("--dry-run", action="store_true", help="Generate Excel & HTML report without sending email")
+    parser.add_argument("--target-date", type=str, default="", help="Target end date (YYYY-MM-DD). Defaults to latest file date / yesterday.")
+    parser.add_argument(
+        "--source",
+        choices=["sharepoint", "scrape", "local"],
+        default="sharepoint",
+        help="Data source: 'sharepoint' (Fast: 15s from 'Ski Data 5'), 'scrape' (18min Playwright portal scrape), or 'local' (offline files)",
+    )
+    parser.add_argument(
+        "--source-folder",
+        type=str,
+        default="Ski Data 5",
+        help="SharePoint source folder name containing rolling 15-day files (default: 'Ski Data 5')",
+    )
+    parser.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="Bypass stale data guard (allows running on older data for testing if today's data is not yet in SharePoint)",
+    )
+    parser.add_argument("--fresh-scrape", action="store_true", help="Alias to force --source scrape (runs Playwright scraper before reconciling)")
+    parser.add_argument("--dry-run", action="store_true", help="Generate Excel report without sending notification or uploading to SharePoint")
     parser.add_argument("--test-mode", action="store_true", help="Run with mock Fabric data for offline local testing")
     parser.add_argument("--test-connection", action="store_true", help="Quickly verify Fabric connection and schema tables in < 3s")
     parser.add_argument("--recipients", type=str, default="", help="Comma-separated recipient emails (overrides .env)")
@@ -87,7 +104,7 @@ def main():
 
     except Exception as e_preflight:
         logger.error(f"❌ Pre-flight Fabric check failed: {e_preflight}")
-        logger.error("Aborting immediately before running the 15-minute scraper to save time.")
+        logger.error("Aborting immediately before running source acquisition to save time.")
         sys.exit(1)
 
     if args.test_connection:
@@ -95,20 +112,46 @@ def main():
         sys.exit(0)
 
     # 1. Resolve Target Date Range
+    explicit_target_date = None
     if args.target_date:
         try:
-            target_end_date = datetime.strptime(args.target_date, "%Y-%m-%d").date()
+            explicit_target_date = datetime.strptime(args.target_date, "%Y-%m-%d").date()
+            target_end_date = explicit_target_date
         except ValueError:
             logger.error(f"Invalid date format for --target-date: {args.target_date}. Expected YYYY-MM-DD.")
             sys.exit(1)
     else:
         target_end_date = datetime.now().date() - timedelta(days=1)
 
-    start_date = target_end_date - timedelta(days=args.days - 1)
-    logger.info(f"Target Evaluation Window: {start_date} to {target_end_date} ({args.days} days)")
+    # 2. Source Data Acquisition (SharePoint 'Ski Data 5', Playwright Scrape, or Local)
+    effective_source = "scrape" if args.fresh_scrape else args.source
 
-    # 2. Optional Fresh Scrape
-    if args.fresh_scrape:
+    if effective_source == "sharepoint":
+        print("\n" + "=" * 70)
+        print(f"📥 STEP 1: FETCH LATEST 15-DAY FILES FROM SHAREPOINT [{args.source_folder}]")
+        print("=" * 70)
+        try:
+            from sharepoint_reader import download_latest_from_sharepoint
+            sp_files = download_latest_from_sharepoint(
+                source_folder=args.source_folder,
+                target_date=explicit_target_date,
+                allow_stale=args.allow_stale,
+                dest_dir="exports",
+            )
+            logger.info(f"✅ SharePoint files successfully fetched from [{args.source_folder}]: {sp_files}")
+            # If target_date was not explicitly pinned by the user, align target_end_date to the file's date
+            if explicit_target_date is None and sp_files.get("file_date"):
+                target_end_date = sp_files["file_date"]
+                logger.info(f"Target evaluation end date aligned with SharePoint file date: {target_end_date}")
+        except Exception as e_sp_src:
+            logger.error(f"❌ SharePoint source fetch failed: {e_sp_src}")
+            logger.error("STALE DATA GUARD: If today's files have not landed yet, aborting to prevent inaccurate audit.")
+            sys.exit(1)
+
+    elif effective_source == "scrape":
+        print("\n" + "=" * 70)
+        print("🌐 STEP 1: EXECUTING LIVE SKIDATA PORTAL SCRAPE (15-DAY ROLLING)")
+        print("=" * 70)
         logger.info("Executing fresh SkiData Playwright scrape (15-day rolling)...")
         os.environ["DAYS_COUNT"] = str(args.days)
         try:
@@ -124,6 +167,14 @@ def main():
         except Exception as e:
             logger.error(f"SkiData scraper failed during fresh scrape: {e}")
             sys.exit(1)
+
+    elif effective_source == "local":
+        print("\n" + "=" * 70)
+        print("📂 STEP 1: USING LOCAL CACHED EXPORTS (Cleaned-Exports/ or exports/)")
+        print("=" * 70)
+
+    start_date = target_end_date - timedelta(days=args.days - 1)
+    logger.info(f"Target Evaluation Window: {start_date} to {target_end_date} ({args.days} days)")
 
     # 3. Handle Recipient Overrides
     if args.recipients:
