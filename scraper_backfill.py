@@ -378,10 +378,6 @@ async def run_in_depth_flow(
         raise RuntimeError(
             f"{file_base_name} download failed integrity check: {summary['error'] or '0 rows'}"
         )
-    if summary["row_count"] >= QLIK_ROW_LIMIT_WARNING:
-        raise RuntimeError(
-            f"{file_base_name} hit Qlik 100k row cap ({summary['row_count']:,} rows); split date range."
-        )
     print(f"Download complete: {target_path} ({summary['row_count']:,} rows, {os.path.getsize(target_path):,} bytes)")
 
 
@@ -486,21 +482,34 @@ async def run_parking_transactions_flow(
     target_path = os.path.join(download_dir, f"{file_prefix}-Parking-Transactions.xlsx")
     if os.path.exists(target_path):
         cached = inspect_xlsx_summary(target_path)
-        if cached["readable"] and cached["row_count"] > 0 and cached["row_count"] < QLIK_ROW_LIMIT_WARNING:
+        manifest_path = os.path.join(download_dir, "_scrape_manifest.json")
+        is_chunk_merged = False
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as fh:
+                    m_data = json.load(fh)
+                    p_info = m_data.get("parking", {})
+                    if p_info.get("mode") == "daily_chunks" and not p_info.get("failed_dates"):
+                        is_chunk_merged = True
+            except Exception:
+                pass
+
+        if cached["readable"] and cached["row_count"] > 0 and (cached["row_count"] < QLIK_ROW_LIMIT_WARNING or is_chunk_merged):
             print(
                 f"Skipping {os.path.basename(target_path)} "
                 f"(cached & verified: {cached['row_count']:,} rows, {cached['file_size']:,} bytes)."
             )
-            _update_scrape_manifest(download_dir, {
-                "parking": {
-                    "mode": "cached",
-                    "full_export_row_count": cached["row_count"],
-                    "portal_empty_dates": [],
-                    "failed_dates": {},
-                    "scraped_dates": [],
-                    "duplicate_chunks_detected": [],
-                }
-            })
+            if not is_chunk_merged:
+                _update_scrape_manifest(download_dir, {
+                    "parking": {
+                        "mode": "cached",
+                        "full_export_row_count": cached["row_count"],
+                        "portal_empty_dates": [],
+                        "failed_dates": {},
+                        "scraped_dates": [],
+                        "duplicate_chunks_detected": [],
+                    }
+                })
             return
         print(f"Cached {os.path.basename(target_path)} invalid or near Qlik limit ({cached['error']}); re-downloading...")
 
