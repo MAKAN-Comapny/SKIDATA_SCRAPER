@@ -211,7 +211,8 @@ async function handler(req, res) {
     return res.status(200).end();
   }
 
-  const ghToken = process.env.GITHUB_TOKEN || process.env.GH_PAT || "";
+  const rawToken = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT || process.env.GH_PAT || process.env.GH_TOKEN || process.env.PAT || "";
+  const ghToken = rawToken.replace(/^Bearer\s+/i, "").trim();
   if (!ghToken) {
     return res.status(200).json({ status: "idle", message: "GITHUB_TOKEN not set" });
   }
